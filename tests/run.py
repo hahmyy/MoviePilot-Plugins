@@ -43,7 +43,7 @@ def _run_generation(generation: str, extra_args: list) -> int:
 if __name__ == "__main__":
     extra = sys.argv[1:]
     exit_code = 0
-    for generation in ("ci", "v3"):
+    for generation in ("ci", "v2", "v3"):
         rc = _run_generation(generation, extra)
         exit_code = exit_code or rc
     sys.exit(exit_code)

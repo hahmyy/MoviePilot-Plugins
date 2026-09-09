@@ -3,13 +3,14 @@
     "name": "App 推送",
     "description": "将 MoviePilot 通知推送到鸿蒙/Android/iOS 客户端（系统级推送）。",
     "labels": "通知,推送",
-    "version": "0.1.0",
+    "version": "1.0.0",
     "icon": "AppPushMsg.png",
     "author": "hahmyy",
     "level": 1,
     "system_version": ">=3.0.0",
     "history": {
-      "v0.1.0": "初始版本：监听 NoticeMessage 事件并转发为极光 JPush v3 系统级推送（鸿蒙/Android/iOS）。"
+      "v1.0.0": "V3 版正式版本线：适配 V3 宿主 App 推送，与 V2 版本并行维护。",
+      "v0.1.0": "初始版本（V3 内测）：监听 NoticeMessage 事件并转发为极光 JPush v3 系统级推送（鸿蒙/Android/iOS）。"
     }
   }
 }

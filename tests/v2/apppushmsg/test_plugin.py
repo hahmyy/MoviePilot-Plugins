@@ -1,21 +1,23 @@
 # -*- coding: utf-8 -*-
-"""AppPushMsg V3 导入、版本线、接口合同与事件转发测试。"""
+"""AppPushMsg V2 导入、版本线、接口合同与事件转发测试。
 
+V2 插件测试沿用插件仓约定，在 V3 后端的 V2 兼容会话中运行（conftest 注入
+plugins.v2），与上游 CI 对 v2 插件的回归方式一致。
+"""
 from __future__ import annotations
 
 import ast
-import asyncio
 import importlib
 import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
-SOURCE = ROOT / "plugins.v3/apppushmsg/__init__.py"
-MANIFEST = ROOT / "package.v3.json"
+SOURCE = ROOT / "plugins.v2/apppushmsg/__init__.py"
+MANIFEST = ROOT / "package.v2.json"
 
 
 def _load_plugin():
-    """用生产命名空间导入插件（conftest 已注入 plugins.v3）。"""
+    """用生产命名空间导入插件（conftest 已注入 plugins.v2）。"""
     return importlib.import_module("app.plugins.apppushmsg")
 
 
@@ -26,8 +28,8 @@ def _new_instance(module, config=None):
     return plugin
 
 
-def test_manifest_and_plugin_are_v3_aligned() -> None:
-    """V3 索引、源码版本、图标与稳定 SDK 入口保持一致，且无旧路径导入。"""
+def test_manifest_and_plugin_are_v2_aligned() -> None:
+    """V2 索引、源码版本、图标与 V2 SDK 入口保持一致。"""
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))["AppPushMsg"]
     source = SOURCE.read_text(encoding="utf-8")
     tree = ast.parse(source)
@@ -37,17 +39,14 @@ def test_manifest_and_plugin_are_v3_aligned() -> None:
         if isinstance(node, ast.ImportFrom)
     }
 
-    assert manifest["version"] == "1.0.0"
-    assert manifest["system_version"] == ">=3.0.0"
-    assert 'plugin_version = "1.0.0"' in source
+    assert manifest["version"] == "0.1.0"
+    assert 'plugin_version = "0.1.0"' in source
     assert manifest["icon"] == "AppPushMsg.png"
     assert (ROOT / "icons" / manifest["icon"]).is_file()
-    assert not any(
-        module.startswith(("app.core.", "app.helper.", "app.utils.", "app.log"))
-        for module in imports
-    )
-    assert "app.sdk.network" in imports
-    assert "app.sdk.events" in imports
+    assert "app.core.event" in imports
+    assert "app.log" in imports
+    assert "app.utils.http" in imports
+    assert not any(module.startswith(("app.sdk",)) for module in imports)
 
 
 def test_run_contract_validates_apikey_and_credentials_without_network() -> None:
@@ -64,32 +63,29 @@ def test_run_contract_validates_apikey_and_credentials_without_network() -> None
         },
     )
 
-    missing_key = asyncio.run(plugin.run())
+    missing_key = plugin.run()
     assert missing_key["code"] != 0 and "Push Key" in missing_key["msg"]
 
-    wrong_key = asyncio.run(plugin.run(apikey="wrong"))
+    wrong_key = plugin.run(apikey="wrong")
     assert wrong_key["code"] != 0 and "Push Key" in wrong_key["msg"]
 
-    valid_key = asyncio.run(plugin.run(apikey="test-key"))
+    valid_key = plugin.run(apikey="test-key")
     assert set(valid_key) == {"code", "msg"}
     assert valid_key["code"] != 0 and "JPush" in valid_key["msg"]
 
-    # 未启用时直接拒绝
     plugin._enabled = False
-    disabled = asyncio.run(plugin.run(apikey="test-key"))
+    disabled = plugin.run(apikey="test-key")
     assert disabled["code"] != 0
 
 
 def test_notice_message_forwards_title_text_and_extras(monkeypatch) -> None:
-    """NoticeMessage 异步转发：携带 title/text，并把事件元信息放入 extras。"""
+    """NoticeMessage 转发：携带 title/text，并把事件元信息放入 extras。"""
     module = _load_plugin()
-    plugin = _new_instance(
-        module, {"enabled": True, "token": "alias-device-1"}
-    )
+    plugin = _new_instance(module, {"enabled": True, "token": "alias-device-1"})
 
     calls = []
 
-    async def fake_push(title, text, extras=None):
+    def fake_push(title, text, extras=None):
         calls.append((title, text, extras or {}))
         return True, "ok"
 
@@ -105,7 +101,7 @@ def test_notice_message_forwards_title_text_and_extras(monkeypatch) -> None:
             "userid": 1,
         },
     )
-    asyncio.run(plugin._on_notice(event))
+    plugin._on_notice(event)
 
     assert calls and calls[0][0] == "订阅完成" and calls[0][1] == "下载完成"
     extras = calls[0][2]
@@ -115,7 +111,7 @@ def test_notice_message_forwards_title_text_and_extras(monkeypatch) -> None:
     empty = module.Event(
         event_type=module.EventType.NoticeMessage, event_data={"text": ""}
     )
-    asyncio.run(plugin._on_notice(empty))
+    plugin._on_notice(empty)
     assert not calls, "空消息应跳过"
 
 
