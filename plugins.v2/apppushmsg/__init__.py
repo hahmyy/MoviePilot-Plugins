@@ -160,7 +160,7 @@ class AppPushMsg(_PluginBase):
     # 插件图标
     plugin_icon = "AppPushMsg.png"
     # 插件版本
-    plugin_version = "0.1.3"
+    plugin_version = "0.1.4"
     # 插件作者
     plugin_author = "hahmyy"
     # 作者主页
@@ -261,7 +261,11 @@ class AppPushMsg(_PluginBase):
         }
 
     def get_page(self) -> List[dict]:
-        """插件详情页：展示最近一次测试结果。"""
+        """插件详情页：展示最近一次测试结果与运行统计。"""
+        return self._build_last_test_card() + self._build_dashboard_elements()
+
+    def _build_last_test_card(self) -> List[dict]:
+        """构建最近一次测试结果卡片。"""
         result = self._read_data("last_test_result")
         if not isinstance(result, dict) or not result:
             return [
@@ -310,21 +314,16 @@ class AppPushMsg(_PluginBase):
                 ],
             }
         ]
-
     # ------------------------------------------------------------------ #
     # 仪表盘：调用次数、连接状态与历史消息
     # ------------------------------------------------------------------ #
-    def get_dashboard_meta(self) -> List[Dict[str, str]]:
-        """声明仪表盘入口，供宿主仪表盘列表展示。"""
-        return [{"key": "apppushmsg_dashboard", "name": "App 推送统计"}]
-
-    def get_dashboard(self, key: str = None, **kwargs):
-        """返回插件仪表盘：调用统计、连接状态与最近消息。"""
+    def _build_dashboard_elements(self) -> List[dict]:
+        """构建仪表盘与详情页共用的统计元素。"""
         stats = self._load_stats()
         history = self._read_data("push_history")
         if not isinstance(history, list):
             history = []
-        elements = [
+        return [
             self._dashboard_status_alert(stats),
             {
                 "component": "VRow",
@@ -383,6 +382,14 @@ class AppPushMsg(_PluginBase):
                 ],
             },
         ]
+
+    def get_dashboard_meta(self) -> List[Dict[str, str]]:
+        """声明仪表盘入口，供宿主仪表盘列表展示。"""
+        return [{"key": "apppushmsg_dashboard", "name": "App 推送统计"}]
+
+    def get_dashboard(self, key: str = None, **kwargs):
+        """返回插件仪表盘：调用统计、连接状态与最近消息。"""
+        elements = self._build_dashboard_elements()
         cols = {"cols": 12, "md": 6}
         attrs = {
             "refresh": 30,

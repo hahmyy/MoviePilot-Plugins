@@ -148,7 +148,7 @@ class AppPushMsg(_PluginBase):
     plugin_name = "App 推送"
     plugin_desc = "将 MoviePilot 通知推送到鸿蒙/Android/iOS 客户端（系统级推送）。"
     plugin_icon = "AppPushMsg.png"
-    plugin_version = "1.0.3"
+    plugin_version = "1.0.4"
     plugin_author = "hahmyy"
     author_url = "https://github.com/hahmyy"
     plugin_config_prefix = "apppushmsg_"
@@ -243,7 +243,11 @@ class AppPushMsg(_PluginBase):
         }
 
     def get_page(self) -> list[dict]:
-        """插件详情页：展示最近一次测试结果。"""
+        """插件详情页：展示最近一次测试结果与运行统计。"""
+        return self._build_last_test_card() + self._build_dashboard_elements()
+
+    def _build_last_test_card(self) -> list[dict]:
+        """构建最近一次测试结果卡片。"""
         result = self._read_data("last_test_result")
         if not isinstance(result, dict) or not result:
             return [
@@ -292,21 +296,16 @@ class AppPushMsg(_PluginBase):
                 ],
             }
         ]
-
     # ------------------------------------------------------------------ #
     # 仪表盘：调用次数、连接状态与历史消息
     # ------------------------------------------------------------------ #
-    def get_dashboard_meta(self) -> list[dict[str, str]]:
-        """声明仪表盘入口，供宿主仪表盘列表展示。"""
-        return [{"key": "apppushmsg_dashboard", "name": "App 推送统计"}]
-
-    def get_dashboard(self, key: str | None = None, **kwargs):
-        """返回插件仪表盘：调用统计、连接状态与最近消息。"""
+    def _build_dashboard_elements(self) -> list[dict]:
+        """构建仪表盘与详情页共用的统计元素。"""
         stats = self._load_stats()
         history = self._read_data("push_history")
         if not isinstance(history, list):
             history = []
-        elements = [
+        return [
             self._dashboard_status_alert(stats),
             {
                 "component": "VRow",
@@ -365,6 +364,14 @@ class AppPushMsg(_PluginBase):
                 ],
             },
         ]
+
+    def get_dashboard_meta(self) -> list[dict[str, str]]:
+        """声明仪表盘入口，供宿主仪表盘列表展示。"""
+        return [{"key": "apppushmsg_dashboard", "name": "App 推送统计"}]
+
+    def get_dashboard(self, key: str | None = None, **kwargs):
+        """返回插件仪表盘：调用统计、连接状态与最近消息。"""
+        elements = self._build_dashboard_elements()
         cols = {"cols": 12, "md": 6}
         attrs = {
             "refresh": 30,
