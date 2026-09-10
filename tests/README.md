@@ -8,10 +8,14 @@
 ```
 tests/
 ├─ _bootstrap.py   薄壳 shim：定位 MoviePilot 后端入 sys.path，引导逻辑委托主程序 app/testing.bootstrap
-├─ conftest.py     pytest 引导：按本次运行目标选择 v2/v3 插件环境并注册网络守卫
-├─ v3/             v3 插件（plugins.v3/）单测；每个插件按插件 ID 建子目录
-└─ v2/             v2 插件（plugins.v2/）单测；每个插件按插件 ID 建子目录
+├─ conftest.py     pytest 引导：按本次运行目标选择 v1/v3 插件环境并注册网络守卫
+├─ v1/             经典 plugins/（V2 兼容）实现的单测；每个插件按插件 ID 建子目录
+└─ v3/             plugins.v3/（V3 专用）实现的单测；每个插件按插件 ID 建子目录
 ```
+
+说明：测试目录的代际对应的是**源码目录**，不是 MoviePilot 版本号。V2 兼容插件
+放在经典 `plugins/` 目录（由根 `package.json` 的 `v2: true` 条目描述），因此其测试
+放在 `tests/v1/`；这与官方仓库对经典 `plugins/` 实现的测试代际命名一致。
 
 ## 运行
 
@@ -20,17 +24,16 @@ tests/
 （例如 `<后端>/.venv/Scripts/python.exe`）：
 
 ```
-# 全量回归（ci/v2/v3 各自独立子进程运行）
+# 全量回归（ci/v1/v3 各自独立子进程运行）
 <python> tests/run.py
 
 # 只跑某个插件某代
-<python> -m pytest tests/v2/apppushmsg
+<python> -m pytest tests/v1/apppushmsg
 <python> -m pytest tests/v3/apppushmsg
 ```
 
-说明：v2 插件测试与上游 CI 一致，使用 V3 后端的 V2 兼容会话回归
-（`plugins.v2` 是否能在 V3 回退加载也是其市场元数据的事实源）；V2 宿主内的
-真实加载仍按 V2 SDK 约定实现并由宿主运行验证。
+经典 `plugins/` 实现的兼容回归在 V3 后端的 v1 兼容会话中进行（与官方 CI 的做法
+一致）；V2 宿主内的真实加载由宿主运行时验证。
 
 隔离 CONFIG_DIR、建表、站点资源垫片、插件目录注入和网络守卫等引导逻辑统一在主程序
 `app/testing` 维护一处；本仓 `tests/_bootstrap.py` 只是「定位后端入 sys.path」的薄壳。
@@ -41,7 +44,7 @@ tests/
 
 ## 新增用例
 
-1. 放到 `tests/<v2|v3>/<plugin_id>/`，文件名使用 `test_*.py`，目录内不再重复插件名前缀；
+1. 放到 `tests/<v1|v3>/<plugin_id>/`，文件名使用 `test_*.py`，目录内不再重复插件名前缀；
 2. 使用 `app.plugins.<plugin_id>` 生产路径导入插件；
 3. 使用 pytest 风格（普通函数 + assert），不用 unittest 组织；
 4. 优先用 `object.__new__` 绕过插件 `__init__` 只测纯逻辑，避免依赖完整运行时；

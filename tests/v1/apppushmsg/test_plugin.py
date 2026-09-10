@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """AppPushMsg V2 导入、版本线、接口合同与事件转发测试。
 
-V2 插件测试沿用插件仓约定，在 V3 后端的 V2 兼容会话中运行（conftest 注入
-plugins.v2），与上游 CI 对 v2 插件的回归方式一致。
+V2 兼容插件放在经典 plugins/ 目录（官方约定由 tests/v1 代会话承载），测试在 V3 后端的兼容会话中运行（conftest 注入
+plugins/），与上游 CI 对经典兼容插件的回归方式一致。
 """
 from __future__ import annotations
 
@@ -12,12 +12,12 @@ import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
-SOURCE = ROOT / "plugins.v2/apppushmsg/__init__.py"
-MANIFEST = ROOT / "package.v2.json"
+SOURCE = ROOT / "plugins/apppushmsg/__init__.py"
+MANIFEST = ROOT / "package.json"
 
 
 def _load_plugin():
-    """用生产命名空间导入插件（conftest 已注入 plugins.v2）。"""
+    """用生产命名空间导入插件（conftest 已注入 plugins/）。"""
     return importlib.import_module("app.plugins.apppushmsg")
 
 

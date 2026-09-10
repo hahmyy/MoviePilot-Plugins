@@ -1,6 +1,6 @@
 """插件仓当前 V3 运行环境回归入口（本仓只维护 V3 插件）。
 
-本仓没有 v1/v2 目录，直接按 tests/ci、tests/v3 分组在独立子进程运行，避免同名
+本仓没有 v2 目录，直接按 tests/ci、tests/v1、tests/v3 分组在独立子进程运行，避免同名
 插件包互相污染。测试引导逻辑委托 MoviePilot 主程序 app/testing.bootstrap。
 """
 import subprocess
@@ -43,7 +43,7 @@ def _run_generation(generation: str, extra_args: list) -> int:
 if __name__ == "__main__":
     extra = sys.argv[1:]
     exit_code = 0
-    for generation in ("ci", "v2", "v3"):
+    for generation in ("ci", "v1", "v3"):
         rc = _run_generation(generation, extra)
         exit_code = exit_code or rc
     sys.exit(exit_code)
