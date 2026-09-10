@@ -37,9 +37,9 @@ def test_manifest_and_plugin_are_v3_aligned() -> None:
         if isinstance(node, ast.ImportFrom)
     }
 
-    assert manifest["version"] == "1.0.4"
+    assert manifest["version"] == "1.0.5"
     assert manifest["system_version"] == ">=3.0.0"
-    assert 'plugin_version = "1.0.4"' in source
+    assert 'plugin_version = "1.0.5"' in source
     assert manifest["icon"] == "AppPushMsg.png"
     assert (ROOT / "icons" / manifest["icon"]).is_file()
     assert not any(
@@ -273,3 +273,55 @@ def test_dashboard_meta_and_message_type_filter() -> None:
         )
     )
     assert len(calls) == 1 and calls[0][0] == "订阅完成"
+
+
+def test_custom_test_content_and_onlyonce_trigger() -> None:
+    """测试内容可自定义，保存“立即发送”开关时触发一次并自动复位。"""
+    module = _load_plugin()
+    plugin = _new_instance(
+        module,
+        {
+            "enabled": True,
+            "apikey": "k",
+            "token": "t",
+            "appkey": "ak",
+            "mastersecret": "ms",
+            "testtitle": "自定义标题",
+            "testtext": "自定义内容",
+        },
+    )
+    form, defaults = plugin.get_form()
+    form_text = json.dumps(form, ensure_ascii=False)
+    assert '"model": "testtitle"' in form_text
+    assert '"model": "testtext"' in form_text
+    assert '"model": "onlyonce"' in form_text
+    assert defaults["onlyonce"] is False
+
+    calls = []
+
+    async def fake_push(title, text, extras=None):
+        calls.append((title, text))
+        return True, "ok"
+
+    plugin._push = fake_push
+    asyncio.run(plugin.run(apikey="k"))
+    assert calls[-1] == ("自定义标题", "自定义内容")
+
+    calls.clear()
+    saved = {}
+    plugin.update_config = lambda cfg, plugin_id=None: saved.update(cfg)
+    plugin._send_test_now = lambda: calls.append("sent")
+    plugin.init_plugin(
+        {
+            "enabled": True,
+            "apikey": "k",
+            "token": "t",
+            "appkey": "ak",
+            "mastersecret": "ms",
+            "onlyonce": True,
+            "testtitle": "x",
+            "testtext": "y",
+        }
+    )
+    assert saved.get("onlyonce") is False
+    assert calls == ["sent"]

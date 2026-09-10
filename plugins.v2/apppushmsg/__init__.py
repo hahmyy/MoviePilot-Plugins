@@ -160,7 +160,7 @@ class AppPushMsg(_PluginBase):
     # 插件图标
     plugin_icon = "AppPushMsg.png"
     # 插件版本
-    plugin_version = "0.1.4"
+    plugin_version = "0.1.5"
     # 插件作者
     plugin_author = "hahmyy"
     # 作者主页
@@ -182,6 +182,9 @@ class AppPushMsg(_PluginBase):
     _appkey = ""
     _mastersecret = ""
     _msgtypes = []
+    _onlyonce = False
+    _test_title = ""
+    _test_text = ""
 
     # ------------------------------------------------------------------ #
     # 生命周期
@@ -194,6 +197,16 @@ class AppPushMsg(_PluginBase):
         self._appkey = str(config.get("appkey") or "").strip()
         self._mastersecret = str(config.get("mastersecret") or "").strip()
         self._msgtypes = list(config.get("msgtypes") or [])
+        self._onlyonce = bool(config.get("onlyonce"))
+        self._test_title = str(config.get("testtitle") or "").strip()
+        self._test_text = str(config.get("testtext") or "").strip()
+        if self._onlyonce:
+            self._onlyonce = False
+            try:
+                self.update_config(self._current_config())
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("AppPushMsg 重置测试开关失败: {}".format(exc))
+            self._send_test_now()
 
     def get_state(self) -> bool:
         return self._enabled
@@ -208,6 +221,29 @@ class AppPushMsg(_PluginBase):
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:
         return []
+
+    def _current_config(self) -> dict:
+        """导出当前配置，供保存与重置测试开关使用。"""
+        return {
+            "enabled": self._enabled,
+            "apikey": self._apikey,
+            "token": self._token,
+            "appkey": self._appkey,
+            "mastersecret": self._mastersecret,
+            "msgtypes": list(self._msgtypes or []),
+            "testtitle": self._test_title,
+            "testtext": self._test_text,
+            "onlyonce": self._onlyonce,
+        }
+
+    def _send_test_now(self) -> None:
+        """按自定义内容立即发送一条测试通知。"""
+        title = self._test_title or self.TEST_TITLE
+        text = self._test_text or self.TEST_TEXT
+        ok, message = self._push(title, text)
+        self._record_event(
+            "测试", title, text, {"code": 0 if ok else 1, "msg": message}, True
+        )
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         """拼装插件配置页面，返回页面配置与默认数据结构。"""
@@ -249,6 +285,23 @@ class AppPushMsg(_PluginBase):
                             "items": _notification_type_options(),
                         },
                     },
+                    {
+                        "component": "VTextField",
+                        "props": {"model": "testtitle", "label": "测试标题（留空用默认）"},
+                    },
+                    {
+                        "component": "VTextarea",
+                        "props": {
+                            "model": "testtext",
+                            "label": "测试内容（留空用默认）",
+                            "rows": 2,
+                            "auto-grow": True,
+                        },
+                    },
+                    {
+                        "component": "VSwitch",
+                        "props": {"model": "onlyonce", "label": "发送测试（保存后立即发送一条）"},
+                    },
                 ],
             }
         ], {
@@ -258,6 +311,9 @@ class AppPushMsg(_PluginBase):
             "appkey": "",
             "mastersecret": "",
             "msgtypes": [],
+            "testtitle": "",
+            "testtext": "",
+            "onlyonce": False,
         }
 
     def get_page(self) -> List[dict]:
@@ -509,13 +565,15 @@ class AppPushMsg(_PluginBase):
             }
         ]
 
-    def run(self, apikey: str = None) -> dict:
+    def run(self, apikey: str = None, title: str = None, text: str = None) -> dict:
         """测试接口：校验 apikey 后发送测试通知，并记录最近一次结果。"""
-        result, attempted = self._execute_test(apikey)
-        self._record_event("测试", self.TEST_TITLE, self.TEST_TEXT, result, attempted)
+        send_title = _coerce_str(title) or self._test_title or self.TEST_TITLE
+        send_text = _coerce_str(text) or self._test_text or self.TEST_TEXT
+        result, attempted = self._execute_test(apikey, title, text)
+        self._record_event("测试", send_title, send_text, result, attempted)
         return result
 
-    def _execute_test(self, apikey: str = None):
+    def _execute_test(self, apikey: str = None, title: str = None, text: str = None):
         if not self._enabled:
             return {"code": 1, "msg": "插件未启用"}, False
         if not self._apikey or (apikey or "").strip() != self._apikey.strip():
@@ -524,8 +582,11 @@ class AppPushMsg(_PluginBase):
             return {"code": 1, "msg": "未配置 App Push Token"}, False
         if not self._appkey or not self._mastersecret:
             return {"code": 1, "msg": "未配置 JPush 服务端凭据"}, False
-        ok, message = self._push(self.TEST_TITLE, self.TEST_TEXT)
+        send_title = _coerce_str(title) or self._test_title or self.TEST_TITLE
+        send_text = _coerce_str(text) or self._test_text or self.TEST_TEXT
+        ok, message = self._push(send_title, send_text)
         return {"code": 0 if ok else 1, "msg": message}, True
+
 
     def _read_data(self, key: str):
         """读插件数据，宿主数据层不可用时返回空。"""
