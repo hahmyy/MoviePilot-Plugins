@@ -14,8 +14,9 @@ tests/
 ```
 
 说明：测试目录的代际对应的是**源码目录**，不是 MoviePilot 版本号。V2 兼容插件
-放在经典 `plugins/` 目录（由根 `package.json` 的 `v2: true` 条目描述），因此其测试
-放在 `tests/v1/`；这与官方仓库对经典 `plugins/` 实现的测试代际命名一致。
+同时维护 `plugins.v2/`（版本化索引）与 `plugins/`（经典回退索引）两份等价源码，
+测试以经典 `plugins/` 副本为准，放在 `tests/v1/`；测试内还会校验两份源码与
+`package.json` / `package.v2.json` 元数据一致。
 
 ## 运行
 

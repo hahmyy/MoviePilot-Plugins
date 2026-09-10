@@ -135,3 +135,15 @@ def test_stop_service_is_idempotent() -> None:
     plugin = _new_instance(module, {})
     plugin.stop_service()
     plugin.stop_service()
+
+
+def test_v2_layouts_stay_identical() -> None:
+    """经典 plugins/ 与版本化 plugins.v2/ 的 V2 实现必须保持一致。"""
+    classic = (ROOT / "plugins/apppushmsg/__init__.py").read_bytes()
+    versioned = (ROOT / "plugins.v2/apppushmsg/__init__.py").read_bytes()
+    assert classic == versioned
+
+    package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))["AppPushMsg"]
+    versioned_package = json.loads((ROOT / "package.v2.json").read_text(encoding="utf-8"))["AppPushMsg"]
+    assert package["version"] == versioned_package["version"] == "0.1.0"
+    assert package["icon"] == versioned_package["icon"] == "AppPushMsg.png"

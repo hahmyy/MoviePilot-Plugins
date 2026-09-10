@@ -1,0 +1,45 @@
+# AppPushMsg（MoviePilot V2 版）
+
+把 MoviePilot 服务端通知推送到鸿蒙/Android/iOS 客户端（系统级推送）。
+功能与 V3 版（plugins.v3/apppushmsg）一致，按 V2 宿主 SDK 实现。
+
+## 约定
+
+- 插件 ID：`AppPushMsg`（App 端据此渲染专用配置页并调用 `/run` 测试接口）。
+- 配置项：
+  - `enabled`：是否启用
+  - `apikey`：Push Key（App 调测试接口时的凭据）
+  - `token`：App Push Token（即极光 Alias，推送目标）
+  - `appkey`：极光 AppKey（服务端鉴权用户名）
+  - `mastersecret`：极光 Master Secret（服务端鉴权密码，仅服务端保存）
+
+## 接口
+
+- `GET /api/v1/plugin/AppPushMsg/run?apikey=<PushKey>`
+  - 需携带登录态（`auth: "bear"`），校验 apikey 后向配置的 token 发送一条测试通知。
+  - 响应：`{"code": 0, "msg": "..."}`；失败 `code` 非 0。
+
+## 事件
+
+- 监听 `EventType.NoticeMessage`（`notice.message`），把服务端通知转发为极光推送。
+- 事件数据取 `title` / `text`，并把 `channel` / `type` / `source` / `userid`
+  放入通知 `extras`，供 App 后续做点击跳转扩展。
+- 可按需扩展监听 `TransferComplete` / `DownloadAdded` / `SubscribeAdded` 等事件。
+
+## 实现说明（已按 V2 宿主 SDK 核对）
+
+- 事件与日志：`app.core.event` 的 eventmanager/Event、`app.log` 的 logger；
+  V2 eventmanager 把同步 handler 放线程池执行，因此事件方法为同步实现。
+- HTTP：`app.utils.http.RequestUtils`（requests 同步）。
+  `post(url, data=None, json=None, **kwargs)` 返回 requests.Response；
+  网络异常默认被吞掉返回 None，HTTP 4xx/5xx 通过响应状态码判定。
+- JPush v3：`POST https://api.jpush.cn/v3/push`，Basic Auth
+  `appkey:mastersecret`；目标 `audience.alias`；平台关键字使用极光官方
+  的 `android` / `ios` / `hmos`（鸿蒙），通知体按平台细分，hmos 带
+  `category: "IM"`；成功响应含 `msg_id`，失败为 `error.code` /
+  `error.message`。
+
+## 资源与版本
+
+- 图标：仓库根 `icons/AppPushMsg.png`（V2/V3 共用），索引 `icon` 字段一致。
+- 版本：`package.v2.json` 内 `AppPushMsg` 版本 0.1.0，与插件类 `plugin_version` 一致。
