@@ -37,9 +37,9 @@ def test_manifest_and_plugin_are_v3_aligned() -> None:
         if isinstance(node, ast.ImportFrom)
     }
 
-    assert manifest["version"] == "1.0.2"
+    assert manifest["version"] == "1.0.3"
     assert manifest["system_version"] == ">=3.0.0"
-    assert 'plugin_version = "1.0.2"' in source
+    assert 'plugin_version = "1.0.3"' in source
     assert manifest["icon"] == "AppPushMsg.png"
     assert (ROOT / "icons" / manifest["icon"]).is_file()
     assert not any(
@@ -223,3 +223,53 @@ def test_dashboard_reports_stats_and_history() -> None:
 
     dashboard_text = json.dumps(plugin.get_dashboard()[2], ensure_ascii=False)
     assert "历史消息" in dashboard_text and "订阅完成" in dashboard_text
+
+
+def test_dashboard_meta_and_message_type_filter() -> None:
+    """仪表盘有元信息入口；消息类型筛选只放行选中的类型。"""
+    module = _load_plugin()
+    plugin = _new_instance(
+        module,
+        {"enabled": True, "token": "alias-device-1", "msgtypes": ["Subscribe"]},
+    )
+    meta = plugin.get_dashboard_meta()
+    assert meta and meta[0]["key"] == "apppushmsg_dashboard" and meta[0]["name"]
+
+    form, defaults = plugin.get_form()
+    assert '"model": "msgtypes"' in json.dumps(form, ensure_ascii=False)
+    assert defaults["msgtypes"] == []
+
+    calls = []
+
+    async def fake_push(title, text, extras=None):
+        calls.append((title, text))
+        return True, "ok"
+
+    plugin._push = fake_push
+    asyncio.run(
+        plugin._on_notice(
+            module.Event(
+                event_type=module.EventType.NoticeMessage,
+                event_data={
+                    "title": "站点消息",
+                    "text": "x",
+                    "type": module.NotificationType.Other,
+                },
+            )
+        )
+    )
+    assert not calls, "未选中的消息类型应跳过"
+
+    asyncio.run(
+        plugin._on_notice(
+            module.Event(
+                event_type=module.EventType.NoticeMessage,
+                event_data={
+                    "title": "订阅完成",
+                    "text": "y",
+                    "type": module.NotificationType.Subscribe,
+                },
+            )
+        )
+    )
+    assert len(calls) == 1 and calls[0][0] == "订阅完成"

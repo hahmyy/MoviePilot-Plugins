@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.core.event import Event, eventmanager
 from app.log import logger
 from app.plugins import _PluginBase
-from app.schemas.types import EventType
+from app.schemas.types import EventType, NotificationType
 from app.utils.http import RequestUtils
 
 
@@ -100,6 +100,25 @@ def _build_extras(event_data: dict) -> dict:
     return extras
 
 
+def _notification_type_options() -> list:
+    """枚举宿主消息类型，供配置页多选。"""
+    return [{"title": item.value, "value": item.name} for item in NotificationType]
+
+
+def _notification_type_name(value: Any) -> str:
+    """把事件里的消息类型统一成 NotificationType 的成员名。"""
+    if value is None:
+        return ""
+    name = getattr(value, "name", "")
+    if name:
+        return str(name)
+    text = _coerce_str(value)
+    for item in NotificationType:
+        if text in (item.name, item.value):
+            return item.name
+    return ""
+
+
 def _compose_notification(title: str, text: str, extras: dict) -> dict:
     """按极光 v3 结构拼装多平台通知体。
 
@@ -141,7 +160,7 @@ class AppPushMsg(_PluginBase):
     # 插件图标
     plugin_icon = "AppPushMsg.png"
     # 插件版本
-    plugin_version = "0.1.2"
+    plugin_version = "0.1.3"
     # 插件作者
     plugin_author = "hahmyy"
     # 作者主页
@@ -162,6 +181,7 @@ class AppPushMsg(_PluginBase):
     _token = ""
     _appkey = ""
     _mastersecret = ""
+    _msgtypes = []
 
     # ------------------------------------------------------------------ #
     # 生命周期
@@ -173,6 +193,7 @@ class AppPushMsg(_PluginBase):
         self._token = str(config.get("token") or "").strip()
         self._appkey = str(config.get("appkey") or "").strip()
         self._mastersecret = str(config.get("mastersecret") or "").strip()
+        self._msgtypes = list(config.get("msgtypes") or [])
 
     def get_state(self) -> bool:
         return self._enabled
@@ -218,6 +239,16 @@ class AppPushMsg(_PluginBase):
                             "type": "password",
                         },
                     },
+                    {
+                        "component": "VSelect",
+                        "props": {
+                            "multiple": True,
+                            "chips": True,
+                            "model": "msgtypes",
+                            "label": "消息类型（不选则转发全部）",
+                            "items": _notification_type_options(),
+                        },
+                    },
                 ],
             }
         ], {
@@ -226,6 +257,7 @@ class AppPushMsg(_PluginBase):
             "token": "",
             "appkey": "",
             "mastersecret": "",
+            "msgtypes": [],
         }
 
     def get_page(self) -> List[dict]:
@@ -282,6 +314,10 @@ class AppPushMsg(_PluginBase):
     # ------------------------------------------------------------------ #
     # 仪表盘：调用次数、连接状态与历史消息
     # ------------------------------------------------------------------ #
+    def get_dashboard_meta(self) -> List[Dict[str, str]]:
+        """声明仪表盘入口，供宿主仪表盘列表展示。"""
+        return [{"key": "apppushmsg_dashboard", "name": "App 推送统计"}]
+
     def get_dashboard(self, key: str = None, **kwargs):
         """返回插件仪表盘：调用统计、连接状态与最近消息。"""
         stats = self._load_stats()
@@ -564,6 +600,10 @@ class AppPushMsg(_PluginBase):
         title = _coerce_str(data.get("title"))
         text = _coerce_str(data.get("text"))
         if not title and not text:
+            return
+        type_name = _notification_type_name(data.get("type"))
+        if type_name and self._msgtypes and type_name not in self._msgtypes:
+            logger.debug("AppPushMsg 消息类型 {} 未开启转发，已跳过".format(type_name))
             return
         ok, message = self._push(title, text, extras=_build_extras(data))
         self._record_event(
