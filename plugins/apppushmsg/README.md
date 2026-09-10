@@ -39,7 +39,8 @@
   `category: "IM"`；成功响应含 `msg_id`，失败为 `error.code` /
   `error.message`。
 
-## 资源与版本
+## 详情页与版本
 
+- 插件详情页展示“最近一次测试结果”（测试时间、目标 Alias 脱敏、返回信息）。
 - 图标：仓库根 `icons/AppPushMsg.png`（V2/V3 共用），索引 `icon` 字段一致。
-- 版本：`package.v2.json` 内 `AppPushMsg` 版本 0.1.0，与插件类 `plugin_version` 一致。
+- 版本：`package.json` / `package.v2.json` 内 `AppPushMsg` 版本 0.1.1，与插件类 `plugin_version` 一致。

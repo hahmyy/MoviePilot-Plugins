@@ -37,9 +37,9 @@ def test_manifest_and_plugin_are_v3_aligned() -> None:
         if isinstance(node, ast.ImportFrom)
     }
 
-    assert manifest["version"] == "1.0.0"
+    assert manifest["version"] == "1.0.1"
     assert manifest["system_version"] == ">=3.0.0"
-    assert 'plugin_version = "1.0.0"' in source
+    assert 'plugin_version = "1.0.1"' in source
     assert manifest["icon"] == "AppPushMsg.png"
     assert (ROOT / "icons" / manifest["icon"]).is_file()
     assert not any(
@@ -139,3 +139,37 @@ def test_stop_service_is_idempotent() -> None:
     plugin = _new_instance(module, {})
     plugin.stop_service()
     plugin.stop_service()
+
+def test_run_records_last_result_and_page_shows_it() -> None:
+    """run 记录最近一次测试结果，get_page 展示时间、目标与返回信息。"""
+    module = _load_plugin()
+    plugin = _new_instance(
+        module,
+        {
+            "enabled": True,
+            "apikey": "test-key",
+            "token": "alias-device-1",
+            "appkey": "",
+            "mastersecret": "",
+        },
+    )
+    store = {}
+
+    async def fake_save(key, value, plugin_id=None):
+        store[key] = value
+
+    plugin.async_save_data = fake_save
+    plugin.get_data = lambda key=None, plugin_id=None: store.get(key)
+
+    empty_page = plugin.get_page()
+    assert empty_page and empty_page[0]["component"] == "VAlert"
+
+    result = asyncio.run(plugin.run(apikey="test-key"))
+    assert result["code"] != 0 and "JPush" in result["msg"]
+    saved = store.get("last_test_result")
+    assert saved and saved["code"] != 0 and "JPush" in saved["msg"]
+    assert "***" in saved["token"]
+
+    page_text = json.dumps(plugin.get_page(), ensure_ascii=False)
+    assert "最近一次测试结果" in page_text
+    assert "测试时间" in page_text and "JPush" in page_text

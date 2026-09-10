@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from datetime import datetime
 from enum import Enum
 from typing import Any
 
@@ -18,6 +19,15 @@ def _coerce_str(value: Any) -> str:
     if isinstance(value, Enum):
         value = value.value
     return str(value).strip()
+
+def _mask_token(token: Any) -> str:
+    """把目标 Alias 脱敏后用于页面展示。"""
+    value = _coerce_str(token)
+    if not value:
+        return "未配置"
+    if len(value) <= 6:
+        return value[0] + "***"
+    return value[:4] + "***" + value[-2:]
 
 
 def _event_data_to_dict(data: Any) -> dict:
@@ -83,7 +93,7 @@ class AppPushMsg(_PluginBase):
     plugin_name = "App 推送"
     plugin_desc = "将 MoviePilot 通知推送到鸿蒙/Android/iOS 客户端（系统级推送）。"
     plugin_icon = "AppPushMsg.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     plugin_author = "hahmyy"
     author_url = "https://github.com/hahmyy"
     plugin_config_prefix = "apppushmsg_"
@@ -163,7 +173,55 @@ class AppPushMsg(_PluginBase):
         }
 
     def get_page(self) -> list[dict]:
-        return []
+        """插件详情页：展示最近一次测试结果。"""
+        result = self.get_data("last_test_result")
+        if not isinstance(result, dict) or not result:
+            return [
+                {
+                    "component": "VAlert",
+                    "props": {
+                        "type": "info",
+                        "variant": "tonal",
+                        "class": "mt-2",
+                        "text": "暂无测试记录，请在配置页点击「发送测试消息」",
+                    },
+                }
+            ]
+        success = result.get("code") == 0
+        lines = [
+            "测试时间：{}".format(result.get("time") or "-"),
+            "目标 Token(Alias)：{}".format(result.get("token") or "未配置"),
+            "返回结果：{}".format(result.get("msg") or "-"),
+        ]
+        return [
+            {
+                "component": "VCard",
+                "props": {
+                    "variant": "tonal",
+                    "color": "success" if success else "error",
+                    "class": "mt-2",
+                },
+                "content": [
+                    {
+                        "component": "VCardTitle",
+                        "props": {"class": "text-subtitle-1 font-weight-bold pb-1"},
+                        "text": "最近一次测试结果：{}".format("成功" if success else "失败"),
+                    },
+                    {
+                        "component": "VCardText",
+                        "props": {"class": "py-2"},
+                        "content": [
+                            {
+                                "component": "div",
+                                "props": {"class": "text-body-2 py-1"},
+                                "text": line,
+                            }
+                            for line in lines
+                        ],
+                    },
+                ],
+            }
+        ]
 
     # ------------------------------------------------------------------ #
     # API：App 配置页“测试”按钮调用
@@ -185,6 +243,12 @@ class AppPushMsg(_PluginBase):
         ]
 
     async def run(self, apikey: str | None = None) -> dict[str, Any]:
+        """测试接口：校验 apikey 后发送测试通知，并记录最近一次结果。"""
+        result = await self._execute_test(apikey)
+        await self._record_test_result(result["code"], result["msg"])
+        return result
+
+    async def _execute_test(self, apikey: str | None = None) -> dict[str, Any]:
         if not self._enabled:
             return {"code": 1, "msg": "插件未启用"}
         if not self._apikey or (apikey or "").strip() != self._apikey.strip():
@@ -197,6 +261,21 @@ class AppPushMsg(_PluginBase):
             "App 推送测试", "这是一条来自 MoviePilot 的测试通知"
         )
         return {"code": 0 if ok else 1, "msg": message}
+
+    async def _record_test_result(self, code: int, msg: str) -> None:
+        """持久化最近一次测试结果，供插件详情页展示。"""
+        try:
+            await self.async_save_data(
+                "last_test_result",
+                {
+                    "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "code": int(code),
+                    "msg": str(msg or ""),
+                    "token": _mask_token(self._token),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"AppPushMsg 保存测试结果失败: {exc}")
 
     # ------------------------------------------------------------------ #
     # 事件：转发服务端消息通知

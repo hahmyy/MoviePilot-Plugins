@@ -42,5 +42,6 @@
 
 ## 资源与版本
 
+- 插件详情页展示“最近一次测试结果”（测试时间、目标 Alias 脱敏、返回信息）。
 - 图标：`icons/AppPushMsg.png`，与 `package.v3.json` 的 `icon` 保持一致。
 - 版本：类 `plugin_version`、`package.v3.json.version` 与 `history` 顶部版本一致。

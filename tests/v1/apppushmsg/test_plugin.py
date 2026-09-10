@@ -39,8 +39,8 @@ def test_manifest_and_plugin_are_v2_aligned() -> None:
         if isinstance(node, ast.ImportFrom)
     }
 
-    assert manifest["version"] == "0.1.0"
-    assert 'plugin_version = "0.1.0"' in source
+    assert manifest["version"] == "0.1.1"
+    assert 'plugin_version = "0.1.1"' in source
     assert manifest["icon"] == "AppPushMsg.png"
     assert (ROOT / "icons" / manifest["icon"]).is_file()
     assert "app.core.event" in imports
@@ -145,5 +145,35 @@ def test_v2_layouts_stay_identical() -> None:
 
     package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))["AppPushMsg"]
     versioned_package = json.loads((ROOT / "package.v2.json").read_text(encoding="utf-8"))["AppPushMsg"]
-    assert package["version"] == versioned_package["version"] == "0.1.0"
+    assert package["version"] == versioned_package["version"] == "0.1.1"
     assert package["icon"] == versioned_package["icon"] == "AppPushMsg.png"
+
+
+def test_run_records_last_result_and_page_shows_it() -> None:
+    """run 记录最近一次测试结果，get_page 展示时间、目标与返回信息。"""
+    module = _load_plugin()
+    plugin = _new_instance(
+        module,
+        {
+            "enabled": True,
+            "apikey": "test-key",
+            "token": "alias-device-1",
+            "appkey": "",
+            "mastersecret": "",
+        },
+    )
+    store = {}
+    plugin.save_data = lambda key, value, plugin_id=None: store.__setitem__(key, value)
+    plugin.get_data = lambda key=None, plugin_id=None: store.get(key)
+
+    empty_page = plugin.get_page()
+    assert empty_page and empty_page[0]["component"] == "VAlert"
+
+    plugin.run(apikey="test-key")
+    saved = store.get("last_test_result")
+    assert saved and saved["code"] != 0 and "JPush" in saved["msg"]
+    assert "***" in saved["token"]
+
+    page_text = json.dumps(plugin.get_page(), ensure_ascii=False)
+    assert "最近一次测试结果" in page_text
+    assert "测试时间" in page_text and "JPush" in page_text
