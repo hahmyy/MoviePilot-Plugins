@@ -37,9 +37,9 @@ def test_manifest_and_plugin_are_v3_aligned() -> None:
         if isinstance(node, ast.ImportFrom)
     }
 
-    assert manifest["version"] == "1.0.1"
+    assert manifest["version"] == "1.0.2"
     assert manifest["system_version"] == ">=3.0.0"
-    assert 'plugin_version = "1.0.1"' in source
+    assert 'plugin_version = "1.0.2"' in source
     assert manifest["icon"] == "AppPushMsg.png"
     assert (ROOT / "icons" / manifest["icon"]).is_file()
     assert not any(
@@ -173,3 +173,53 @@ def test_run_records_last_result_and_page_shows_it() -> None:
     page_text = json.dumps(plugin.get_page(), ensure_ascii=False)
     assert "最近一次测试结果" in page_text
     assert "测试时间" in page_text and "JPush" in page_text
+
+
+def test_dashboard_reports_stats_and_history() -> None:
+    """仪表盘包含调用统计、连接状态与历史消息。"""
+    module = _load_plugin()
+    plugin = _new_instance(
+        module,
+        {
+            "enabled": True,
+            "apikey": "test-key",
+            "token": "alias-device-1",
+            "appkey": "ak",
+            "mastersecret": "ms",
+        },
+    )
+    store = {}
+
+    async def fake_save(key, value, plugin_id=None):
+        store[key] = value
+
+    async def fake_push(title, text, extras=None):
+        return True, "推送成功，msg_id=m1"
+
+    plugin.async_save_data = fake_save
+    plugin.get_data = lambda key=None, plugin_id=None: store.get(key)
+    plugin._push = fake_push
+
+    cols, attrs, elements = plugin.get_dashboard()
+    assert cols["cols"] == 12 and attrs["refresh"]
+    assert "暂无推送记录" in json.dumps(elements, ensure_ascii=False)
+
+    asyncio.run(plugin.run(apikey="test-key"))
+    stats = store.get("push_stats")
+    assert stats["push_total"] == 1 and stats["push_success"] == 1
+    assert stats["test_calls"] == 1
+    assert store["push_history"][0]["kind"] == "测试"
+
+    asyncio.run(
+        plugin._on_notice(
+            module.Event(
+                event_type=module.EventType.NoticeMessage,
+                event_data={"title": "订阅完成", "text": "下载完成"},
+            )
+        )
+    )
+    stats = store.get("push_stats")
+    assert stats["push_total"] == 2 and stats["notice_total"] == 1
+
+    dashboard_text = json.dumps(plugin.get_dashboard()[2], ensure_ascii=False)
+    assert "历史消息" in dashboard_text and "订阅完成" in dashboard_text

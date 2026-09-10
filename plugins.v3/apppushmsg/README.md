@@ -43,5 +43,6 @@
 ## 资源与版本
 
 - 插件详情页展示“最近一次测试结果”（测试时间、目标 Alias 脱敏、返回信息）。
+- 插件仪表盘展示调用次数、成功/失败次数、连接状态与最近 20 条历史消息。
 - 图标：`icons/AppPushMsg.png`，与 `package.v3.json` 的 `icon` 保持一致。
 - 版本：类 `plugin_version`、`package.v3.json.version` 与 `history` 顶部版本一致。

@@ -37,6 +37,42 @@ def _mask_token(token: Any) -> str:
         return value[0] + "***"
     return value[:4] + "***" + value[-2:]
 
+def _now_str() -> str:
+    """返回本地时间字符串。"""
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _default_stats() -> dict:
+    """推送统计的默认结构。"""
+    return {
+        "push_total": 0,
+        "push_success": 0,
+        "push_failure": 0,
+        "test_calls": 0,
+        "notice_total": 0,
+        "last_push_time": "",
+        "last_push_ok": None,
+        "last_push_message": "",
+        "last_test_time": "",
+        "last_test_code": 0,
+        "last_test_message": "",
+    }
+
+
+def _truncate(value: Any, limit: int = 60) -> str:
+    """截断长文本，避免仪表盘行过长。"""
+    text = _coerce_str(value)
+    if len(text) <= limit:
+        return text
+    return text[: max(1, limit - 1)] + "…"
+
+
+def _append_history(history: Any, entry: dict, limit: int = 20) -> list:
+    """把新记录插入历史并只保留最近 limit 条。"""
+    items = [item for item in history if isinstance(item, dict)] if isinstance(history, list) else []
+    items.insert(0, entry)
+    return items[:limit]
+
 
 def _event_data_to_dict(data: Any) -> dict:
     """把广播事件携带的数据统一成字典，兼容 dict / Pydantic / 旧对象。"""
@@ -105,7 +141,7 @@ class AppPushMsg(_PluginBase):
     # 插件图标
     plugin_icon = "AppPushMsg.png"
     # 插件版本
-    plugin_version = "0.1.1"
+    plugin_version = "0.1.2"
     # 插件作者
     plugin_author = "hahmyy"
     # 作者主页
@@ -118,6 +154,8 @@ class AppPushMsg(_PluginBase):
     auth_level = 1
 
     JPUSH_PUSH_URL = "https://api.jpush.cn/v3/push"
+    TEST_TITLE = "App 推送测试"
+    TEST_TEXT = "这是一条来自 MoviePilot 的测试通知"
 
     _enabled = False
     _apikey = ""
@@ -192,7 +230,7 @@ class AppPushMsg(_PluginBase):
 
     def get_page(self) -> List[dict]:
         """插件详情页：展示最近一次测试结果。"""
-        result = self.get_data("last_test_result")
+        result = self._read_data("last_test_result")
         if not isinstance(result, dict) or not result:
             return [
                 {
@@ -242,6 +280,177 @@ class AppPushMsg(_PluginBase):
         ]
 
     # ------------------------------------------------------------------ #
+    # 仪表盘：调用次数、连接状态与历史消息
+    # ------------------------------------------------------------------ #
+    def get_dashboard(self, key: str = None, **kwargs):
+        """返回插件仪表盘：调用统计、连接状态与最近消息。"""
+        stats = self._load_stats()
+        history = self._read_data("push_history")
+        if not isinstance(history, list):
+            history = []
+        elements = [
+            self._dashboard_status_alert(stats),
+            {
+                "component": "VRow",
+                "content": [
+                    self._dashboard_stat_card(
+                        "调用次数",
+                        str(stats["push_total"]),
+                        "mdi-send",
+                        "primary",
+                        "测试 {} · 通知 {}".format(stats["test_calls"], stats["notice_total"]),
+                    ),
+                    self._dashboard_stat_card(
+                        "成功",
+                        str(stats["push_success"]),
+                        "mdi-check-circle",
+                        "success",
+                        "最近 {}".format(stats["last_push_time"] or "-"),
+                    ),
+                    self._dashboard_stat_card(
+                        "失败",
+                        str(stats["push_failure"]),
+                        "mdi-alert-circle",
+                        "error" if stats["push_failure"] else "success",
+                        stats["last_push_message"] or "暂无失败记录",
+                    ),
+                    self._dashboard_stat_card(
+                        "最近测试",
+                        stats["last_test_time"] or "暂无",
+                        "mdi-test-tube",
+                        "info",
+                        "code {} · {}".format(stats["last_test_code"], stats["last_test_message"] or "-"),
+                    ),
+                ],
+            },
+            {
+                "component": "VCard",
+                "props": {"variant": "tonal", "class": "mt-3"},
+                "content": [
+                    {
+                        "component": "VCardTitle",
+                        "props": {"class": "text-subtitle-1 font-weight-bold pb-1"},
+                        "text": "历史消息（最近 {} 条）".format(len(history)),
+                    },
+                    {
+                        "component": "VCardText",
+                        "props": {"class": "py-2"},
+                        "content": [
+                            {
+                                "component": "div",
+                                "props": {"class": "text-body-2 py-1"},
+                                "text": line,
+                            }
+                            for line in self._history_lines(history)
+                        ],
+                    },
+                ],
+            },
+        ]
+        cols = {"cols": 12, "md": 6}
+        attrs = {
+            "refresh": 30,
+            "border": True,
+            "title": "App 推送统计",
+            "subtitle": "调用次数、连接状态与最近消息",
+        }
+        return cols, attrs, elements
+
+    def _dashboard_status_alert(self, stats: dict) -> dict:
+        configured = bool(self._enabled and self._appkey and self._mastersecret and self._token)
+        if not configured:
+            alert_type = "warning"
+            text = "未就绪：请启用插件并配置极光 AppKey / Master Secret / App Push Token"
+        elif stats.get("last_push_ok") is True:
+            alert_type = "success"
+            text = "连接正常：最近一次推送成功（{}）".format(stats.get("last_push_time") or "-")
+        elif stats.get("last_push_ok") is False:
+            alert_type = "error"
+            text = "连接异常：最近一次推送失败（{}）：{}".format(
+                stats.get("last_push_time") or "-",
+                stats.get("last_push_message") or "-",
+            )
+        else:
+            alert_type = "info"
+            text = "暂无推送记录，连接状态待验证"
+        return {
+            "component": "VAlert",
+            "props": {
+                "type": alert_type,
+                "variant": "tonal",
+                "density": "compact",
+                "class": "mb-3",
+            },
+            "text": text,
+        }
+
+    @staticmethod
+    def _dashboard_stat_card(label: str, value: str, icon: str, color: str, subtitle: str = "") -> dict:
+        return {
+            "component": "VCol",
+            "props": {"cols": 12, "sm": 6, "md": 3},
+            "content": [
+                {
+                    "component": "VCard",
+                    "props": {"variant": "tonal", "class": "h-100"},
+                    "content": [
+                        {
+                            "component": "VCardText",
+                            "props": {"class": "d-flex align-center ga-3"},
+                            "content": [
+                                {
+                                    "component": "div",
+                                    "props": {"class": "flex-grow-1", "style": "min-width: 0;"},
+                                    "content": [
+                                        {
+                                            "component": "span",
+                                            "props": {"class": "text-caption text-medium-emphasis text-truncate d-block"},
+                                            "text": label,
+                                        },
+                                        {
+                                            "component": "div",
+                                            "props": {"class": "text-h6 text-truncate"},
+                                            "text": value,
+                                        },
+                                        {
+                                            "component": "span",
+                                            "props": {"class": "text-caption text-medium-emphasis text-truncate d-block"},
+                                            "text": subtitle or "-",
+                                        },
+                                    ],
+                                },
+                                {
+                                    "component": "VIcon",
+                                    "props": {"color": color, "size": "28", "class": "flex-shrink-0"},
+                                    "text": icon,
+                                },
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+
+    @staticmethod
+    def _history_lines(history: list) -> list:
+        if not history:
+            return ["暂无历史消息"]
+        lines = []
+        for item in history[:10]:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                "[{}] {} · {} · {}：{}".format(
+                    item.get("time") or "-",
+                    item.get("kind") or "推送",
+                    "成功" if item.get("ok") else "失败",
+                    _truncate(item.get("title") or "-", 20),
+                    _truncate(item.get("summary") or item.get("message") or "-", 60),
+                )
+            )
+        return lines or ["暂无历史消息"]
+
+    # ------------------------------------------------------------------ #
     # API：App 配置页“测试”按钮调用
     # 最终路径：/api/v1/plugin/AppPushMsg/run
     # ------------------------------------------------------------------ #
@@ -259,38 +468,89 @@ class AppPushMsg(_PluginBase):
 
     def run(self, apikey: str = None) -> dict:
         """测试接口：校验 apikey 后发送测试通知，并记录最近一次结果。"""
-        result = self._execute_test(apikey)
-        self._record_test_result(result["code"], result["msg"])
+        result, attempted = self._execute_test(apikey)
+        self._record_event("测试", self.TEST_TITLE, self.TEST_TEXT, result, attempted)
         return result
 
-    def _execute_test(self, apikey: str = None) -> dict:
+    def _execute_test(self, apikey: str = None):
         if not self._enabled:
-            return {"code": 1, "msg": "插件未启用"}
+            return {"code": 1, "msg": "插件未启用"}, False
         if not self._apikey or (apikey or "").strip() != self._apikey.strip():
-            return {"code": 1, "msg": "Push Key 校验失败"}
+            return {"code": 1, "msg": "Push Key 校验失败"}, False
         if not self._token:
-            return {"code": 1, "msg": "未配置 App Push Token"}
+            return {"code": 1, "msg": "未配置 App Push Token"}, False
         if not self._appkey or not self._mastersecret:
-            return {"code": 1, "msg": "未配置 JPush 服务端凭据"}
-        ok, message = self._push(
-            "App 推送测试", "这是一条来自 MoviePilot 的测试通知"
-        )
-        return {"code": 0 if ok else 1, "msg": message}
+            return {"code": 1, "msg": "未配置 JPush 服务端凭据"}, False
+        ok, message = self._push(self.TEST_TITLE, self.TEST_TEXT)
+        return {"code": 0 if ok else 1, "msg": message}, True
 
-    def _record_test_result(self, code: int, msg: str) -> None:
-        """持久化最近一次测试结果，供插件详情页展示。"""
+    def _read_data(self, key: str):
+        """读插件数据，宿主数据层不可用时返回空。"""
         try:
-            self.save_data(
+            return self.get_data(key)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _write_data(self, key: str, value) -> None:
+        """写插件数据，失败只记日志、不影响推送主流程。"""
+        try:
+            self.save_data(key, value)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("AppPushMsg 写入插件数据失败: {}".format(exc))
+
+    def _load_stats(self) -> dict:
+        data = _default_stats()
+        stored = self._read_data("push_stats")
+        if isinstance(stored, dict):
+            for key in data:
+                if key in stored:
+                    data[key] = stored[key]
+        return data
+
+    def _record_event(self, kind: str, title: str, text: str, result: dict, attempted: bool) -> None:
+        """记录一次测试或通知推送，更新统计与历史。"""
+        stats = self._load_stats()
+        now = _now_str()
+        success = int(result.get("code") or 0) == 0
+        if kind == "测试":
+            stats["test_calls"] = int(stats.get("test_calls") or 0) + 1
+            stats["last_test_time"] = now
+            stats["last_test_code"] = int(result.get("code") or 0)
+            stats["last_test_message"] = str(result.get("msg") or "")
+        else:
+            stats["notice_total"] = int(stats.get("notice_total") or 0) + 1
+        if attempted:
+            stats["push_total"] = int(stats.get("push_total") or 0) + 1
+            stats["last_push_time"] = now
+            stats["last_push_ok"] = success
+            stats["last_push_message"] = str(result.get("msg") or "")
+            if success:
+                stats["push_success"] = int(stats.get("push_success") or 0) + 1
+            else:
+                stats["push_failure"] = int(stats.get("push_failure") or 0) + 1
+        history = _append_history(
+            self._read_data("push_history"),
+            {
+                "time": now,
+                "kind": kind,
+                "title": _truncate(title, 40),
+                "summary": _truncate(text, 80),
+                "ok": success,
+                "message": _truncate(result.get("msg"), 120),
+            },
+        )
+        self._write_data("push_stats", stats)
+        self._write_data("push_history", history)
+        if kind == "测试":
+            self._write_data(
                 "last_test_result",
                 {
-                    "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "code": int(code),
-                    "msg": str(msg or ""),
+                    "time": now,
+                    "code": stats["last_test_code"],
+                    "msg": stats["last_test_message"],
                     "token": _mask_token(self._token),
                 },
             )
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("AppPushMsg 保存测试结果失败: {}".format(exc))
 
     # ------------------------------------------------------------------ #
     # 事件：转发服务端消息通知
@@ -305,7 +565,14 @@ class AppPushMsg(_PluginBase):
         text = _coerce_str(data.get("text"))
         if not title and not text:
             return
-        self._push(title, text, extras=_build_extras(data))
+        ok, message = self._push(title, text, extras=_build_extras(data))
+        self._record_event(
+            "通知",
+            title,
+            text,
+            {"code": 0 if ok else 1, "msg": message},
+            True,
+        )
 
     # ------------------------------------------------------------------ #
     # 极光推送 v3
