@@ -37,9 +37,9 @@ def test_manifest_and_plugin_are_v3_aligned() -> None:
         if isinstance(node, ast.ImportFrom)
     }
 
-    assert manifest["version"] == "1.0.5"
+    assert manifest["version"] == "1.0.6"
     assert manifest["system_version"] == ">=3.0.0"
-    assert 'plugin_version = "1.0.5"' in source
+    assert 'plugin_version = "1.0.6"' in source
     assert manifest["icon"] == "AppPushMsg.png"
     assert (ROOT / "icons" / manifest["icon"]).is_file()
     assert not any(
@@ -325,3 +325,196 @@ def test_custom_test_content_and_onlyonce_trigger() -> None:
     )
     assert saved.get("onlyonce") is False
     assert calls == ["sent"]
+
+
+# --------------------------------------------------------------------- #
+# 华为 Push Kit 直连渠道测试
+# --------------------------------------------------------------------- #
+import base64 as _b64
+import functools as _functools
+
+from cryptography.hazmat.primitives import hashes as _hashes
+from cryptography.hazmat.primitives import serialization as _serialization
+from cryptography.hazmat.primitives.asymmetric import padding as _padding
+from cryptography.hazmat.primitives.asymmetric import rsa as _rsa
+
+
+@_functools.lru_cache(maxsize=1)
+def _service_account():
+    """生成测试用服务账号（RSA 私钥仅存在于测试内存）。"""
+    key = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = key.private_bytes(
+        _serialization.Encoding.PEM,
+        _serialization.PrivateFormat.PKCS8,
+        _serialization.NoEncryption(),
+    ).decode("utf-8")
+    return {
+        "key_id": "kid-test",
+        "sub_account": "sub-test",
+        "private_key": pem,
+        "token_uri": "https://oauth-login.cloud.huawei.com/oauth2/v3/token",
+        "project_id": "proj-test",
+    }
+
+
+def _decode_segment(segment: str):
+    padded = segment + "=" * (-len(segment) % 4)
+    return json.loads(_b64.urlsafe_b64decode(padded).decode("utf-8"))
+
+
+class _FakeResponse:
+    def __init__(self, status, payload):
+        self.status_code = status
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+def test_huawei_service_account_jwt_matches_official_contract() -> None:
+    """服务账号 JWT：PS256、kid/typ/alg 与 aud/iss/iat/exp 符合官方文档。"""
+    module = _load_plugin()
+    account = _service_account()
+    token = module._build_service_account_jwt(account, now=1700000000)
+    header_seg, payload_seg, signature_seg = token.split(".")
+    header = _decode_segment(header_seg)
+    claims = _decode_segment(payload_seg)
+    assert header == {"kid": "kid-test", "typ": "JWT", "alg": "PS256"}
+    assert claims["aud"] == account["token_uri"]
+    assert claims["iss"] == "sub-test"
+    assert claims["iat"] == 1700000000 and claims["exp"] - claims["iat"] == 3600
+
+    key = _serialization.load_pem_private_key(account["private_key"].encode("utf-8"), password=None)
+    signature = _b64.urlsafe_b64decode(signature_seg + "=" * (-len(signature_seg) % 4))
+    key.public_key().verify(
+        signature,
+        "{}.{}".format(header_seg, payload_seg).encode("ascii"),
+        _padding.PSS(mgf=_padding.MGF1(_hashes.SHA256()), salt_length=_hashes.SHA256().digest_size),
+        _hashes.SHA256(),
+    )
+
+
+def test_huawei_payload_and_response_parsing() -> None:
+    """v3 请求体结构与响应码解析符合官方文档。"""
+    module = _load_plugin()
+    payload = module._build_huawei_payload("标题", "正文", "MARKETING", "TOKEN1")
+    notification = payload["payload"]["notification"]
+    assert notification["title"] == "标题" and notification["body"] == "正文"
+    assert notification["category"] == "MARKETING"
+    assert payload["target"] == {"token": ["TOKEN1"]}
+    assert payload["pushOptions"]["testMessage"] is False
+    fallback = module._build_huawei_payload("t", "b", "UNKNOWN", "T")
+    assert fallback["payload"]["notification"]["category"] == "MARKETING"
+
+    ok, message = module._parse_huawei_response(200, {"code": "80000000", "msg": "Success", "requestId": "R1"})
+    assert ok and "R1" in message
+    ok, message = module._parse_huawei_response(401, {"code": "80200001", "msg": "Authentication failed", "requestId": "R2"})
+    assert not ok and "80200001" in message and "Authentication failed" in message
+
+
+def test_huawei_channel_uses_access_token_and_v3_request(monkeypatch) -> None:
+    """huawei 渠道先换 access_token，再按 v3 契约发送。"""
+    module = _load_plugin()
+    account = _service_account()
+    plugin = _new_instance(
+        module,
+        {
+            "enabled": True,
+            "apikey": "k",
+            "channel": "huawei",
+            "token": "TOKEN1",
+            "project_id": "proj-test",
+            "appkey": "",
+            "mastersecret": "",
+        },
+    )
+    plugin._hw_service_account = account
+    calls = []
+
+    class FakeAsyncRequestUtils:
+        async def post(self, url, **kwargs):
+            calls.append((url, kwargs))
+            if "oauth2" in url:
+                return _FakeResponse(200, {"access_token": "AT1", "expires_in": 3600})
+            return _FakeResponse(200, {"code": "80000000", "msg": "Success", "requestId": "R1"})
+
+    monkeypatch.setattr(module, "AsyncRequestUtils", FakeAsyncRequestUtils)
+    ok, message = asyncio.run(plugin._push_huawei("标题", "正文"))
+    assert ok and "R1" in message
+    assert len(calls) == 2
+    exchange = calls[0][1]["data"]
+    assert exchange["grant_type"] == module.HUAWEI_JWT_BEARER_GRANT
+    assert exchange["assertion"].count(".") == 2
+    push_url, push_kwargs = calls[1]
+    assert push_url.endswith("/v3/proj-test/messages:send")
+    assert push_kwargs["headers"]["push-type"] == "0"
+    assert push_kwargs["headers"]["Authorization"] == "Bearer AT1"
+    assert push_kwargs["json"]["target"]["token"] == ["TOKEN1"]
+
+
+def test_huawei_channel_falls_back_to_jwt(monkeypatch) -> None:
+    """换 access_token 不可用时回退官方 JWT 直连，且不泄露私钥。"""
+    module = _load_plugin()
+    account = _service_account()
+    plugin = _new_instance(
+        module,
+        {"enabled": True, "apikey": "k", "channel": "huawei", "token": "TOKEN1", "project_id": "proj-test"},
+    )
+    plugin._hw_service_account = account
+    calls = []
+
+    class FakeAsyncRequestUtils:
+        async def post(self, url, **kwargs):
+            calls.append((url, kwargs))
+            if "oauth2" in url:
+                return _FakeResponse(401, {"error": "invalid_grant"})
+            return _FakeResponse(200, {"code": "80000000", "msg": "Success", "requestId": "R1"})
+
+    monkeypatch.setattr(module, "AsyncRequestUtils", FakeAsyncRequestUtils)
+    ok, message = asyncio.run(plugin._push_huawei("t", "b"))
+    assert ok
+    auth = calls[-1][1]["headers"]["Authorization"]
+    assert auth.startswith("Bearer ") and auth[len("Bearer "):].count(".") == 2
+    assert account["private_key"] not in message
+    assert account["private_key"][:20] not in message
+
+
+def test_huawei_config_and_pages_do_not_expose_service_account() -> None:
+    """服务账号 JSON 不进入配置响应、页面与仪表盘。"""
+    module = _load_plugin()
+    account = _service_account()
+    plugin = _new_instance(module, {"enabled": True, "channel": "huawei", "token": "TOKEN1", "project_id": "proj-test"})
+    stored = {}
+    plugin._store_service_account = lambda value: stored.update(value)
+    configured = {}
+    plugin.update_config = lambda cfg, plugin_id=None: configured.update(cfg)
+    plugin._read_data = lambda key: None
+    plugin.init_plugin(
+        {
+            "enabled": True,
+            "channel": "huawei",
+            "token": "TOKEN1",
+            "project_id": "proj-test",
+            "service_account_json": json.dumps(account),
+        }
+    )
+    assert stored["key_id"] == "kid-test"
+    assert configured.get("service_account_json") == ""
+    assert account["private_key"] not in json.dumps(configured, ensure_ascii=False)
+    assert plugin.get_form()[1]["service_account_json"] == ""
+
+    plugin.get_data = lambda key=None, plugin_id=None: {}
+    page_text = json.dumps(plugin.get_page(), ensure_ascii=False)
+    dashboard_text = json.dumps(plugin.get_dashboard()[2], ensure_ascii=False)
+    assert "private_key" not in page_text and "private_key" not in dashboard_text
+    assert account["private_key"][:20] not in page_text
+
+
+def test_huawei_missing_config_returns_readable_error() -> None:
+    """huawei 渠道未配置时返回可读错误，且 run 响应不含私钥。"""
+    module = _load_plugin()
+    plugin = _new_instance(module, {"enabled": True, "apikey": "k", "channel": "huawei", "token": "TOKEN1"})
+    plugin._read_data = lambda key=None, plugin_id=None: None
+    result = asyncio.run(plugin.run(apikey="k"))
+    assert result["code"] != 0 and "华为" in result["msg"]
+    assert "private_key" not in json.dumps(result, ensure_ascii=False)

@@ -9,9 +9,19 @@
 from __future__ import annotations
 
 import base64
+import json
+import time
 from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
+
+try:
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding
+except Exception:  # pragma: no cover - 运行期由 _build_service_account_jwt 报错
+    hashes = None
+    serialization = None
+    padding = None
 
 from app.core.event import Event, eventmanager
 from app.log import logger
@@ -119,6 +129,131 @@ def _notification_type_name(value: Any) -> str:
     return ""
 
 
+# 华为 Push Kit v3 直连（服务账号 JWT / PS256）
+# 以下常量与请求结构依据华为官方文档核对（2026-09）：
+# - 基于服务账号生成鉴权令牌：PS256 JWT，claims aud/iss/iat/exp
+# - 推送场景化消息：POST /v3/{projectId}/messages:send，Header push-type: 0
+# - 请求体：payload.notification{category,title,body} + target.token + pushOptions
+HUAWEI_PUSH_URL_TEMPLATE = "https://push-api.cloud.huawei.com/v3/{project_id}/messages:send"
+HUAWEI_DEFAULT_TOKEN_URI = "https://oauth-login.cloud.huawei.com/oauth2/v3/token"
+HUAWEI_JWT_BEARER_GRANT = "urn:ietf:params:oauth:grant-type:jwt-bearer"
+HUAWEI_SUCCESS_CODE = "80000000"
+HUAWEI_CATEGORIES = [
+    "IM",
+    "VOIP",
+    "MISS_CALL",
+    "SUBSCRIPTION",
+    "TRAVEL",
+    "HEALTH",
+    "WORK",
+    "ACCOUNT",
+    "EXPRESS",
+    "FINANCE",
+    "DEVICE_REMINDER",
+    "MAIL",
+    "PLAY_VOICE",
+    "MARKETING",
+]
+
+
+def _b64url(data: bytes) -> str:
+    """JWT 使用的无填充 Base64URL 编码。"""
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _parse_service_account(raw: Any):
+    """解析服务账号 JSON，成功返回 dict，否则返回 None。"""
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            data = json.loads(raw)
+        except Exception:  # noqa: BLE001
+            return None
+        return data if isinstance(data, dict) else None
+    return None
+
+
+def _mask_service_account(account: Any) -> str:
+    """服务账号脱敏描述，仅展示非敏感标识。"""
+    if not isinstance(account, dict):
+        return "未配置"
+    sub = _truncate(account.get("sub_account"), 12) or "-"
+    key_id = _truncate(account.get("key_id"), 12) or "-"
+    return "sub_account={} key_id={}".format(sub, key_id)
+
+
+def _build_service_account_jwt(account: dict, now: int = None) -> str:
+    """按华为官方文档生成服务账号鉴权 JWT（PS256）。"""
+    if hashes is None or serialization is None or padding is None:
+        raise RuntimeError("缺少 cryptography 依赖，无法生成华为服务账号令牌")
+    if not isinstance(account, dict):
+        raise ValueError("未配置华为服务账号 JSON")
+    key_id = _coerce_str(account.get("key_id"))
+    sub_account = _coerce_str(account.get("sub_account"))
+    private_key = account.get("private_key")
+    if not key_id or not sub_account or not private_key:
+        raise ValueError("服务账号 JSON 缺少 key_id / sub_account / private_key")
+    issued_at = int(now if now is not None else time.time())
+    token_uri = _coerce_str(account.get("token_uri")) or HUAWEI_DEFAULT_TOKEN_URI
+    header = {"kid": key_id, "typ": "JWT", "alg": "PS256"}
+    claims = {
+        "aud": token_uri,
+        "iss": sub_account,
+        "iat": issued_at,
+        "exp": issued_at + 3600,
+    }
+    signing_input = "{}.{}".format(
+        _b64url(json.dumps(header, separators=(",", ":"), ensure_ascii=False).encode("utf-8")),
+        _b64url(json.dumps(claims, separators=(",", ":"), ensure_ascii=False).encode("utf-8")),
+    )
+    key = serialization.load_pem_private_key(str(private_key).encode("utf-8"), password=None)
+    signature = key.sign(
+        signing_input.encode("ascii"),
+        padding.PSS(
+            mgf=padding.MGF1(hashes.SHA256()),
+            salt_length=hashes.SHA256().digest_size,
+        ),
+        hashes.SHA256(),
+    )
+    return "{}.{}".format(signing_input, _b64url(signature))
+
+
+def _huawei_category_options() -> list:
+    """华为通知分类选项（官方文档取值）。"""
+    return [{"title": item, "value": item} for item in HUAWEI_CATEGORIES]
+
+
+def _build_huawei_payload(title: str, text: str, category: str, push_token: str) -> dict:
+    """按官方 v3 场景化消息结构拼装通知体。"""
+    title = _coerce_str(title) or "MoviePilot"
+    body = _coerce_str(text) or title
+    category = _coerce_str(category) if _coerce_str(category) in HUAWEI_CATEGORIES else "MARKETING"
+    return {
+        "payload": {
+            "notification": {
+                "category": category,
+                "title": title,
+                "body": body,
+                "clickAction": {"actionType": 0},
+            }
+        },
+        "target": {"token": [push_token]},
+        "pushOptions": {"testMessage": False, "ttl": 86400},
+    }
+
+
+def _parse_huawei_response(status: int, body: Any) -> tuple:
+    """解析华为响应，返回 (是否成功, 结果描述)。"""
+    body = body if isinstance(body, dict) else {}
+    code = _coerce_str(body.get("code")) or str(status or "")
+    message = _coerce_str(body.get("msg")) or _coerce_str(body.get("message")) or "推送失败"
+    request_id = _coerce_str(body.get("requestId"))
+    if int(status or 0) < 400 and code == HUAWEI_SUCCESS_CODE:
+        return True, "推送成功，requestId={}".format(request_id or "-")
+    return False, "推送失败（{}）：{}".format(code or "-", message)
+
+
 def _compose_notification(title: str, text: str, extras: dict) -> dict:
     """按极光 v3 结构拼装多平台通知体。
 
@@ -160,7 +295,7 @@ class AppPushMsg(_PluginBase):
     # 插件图标
     plugin_icon = "AppPushMsg.png"
     # 插件版本
-    plugin_version = "0.1.5"
+    plugin_version = "0.1.6"
     # 插件作者
     plugin_author = "hahmyy"
     # 作者主页
@@ -185,6 +320,15 @@ class AppPushMsg(_PluginBase):
     _onlyonce = False
     _test_title = ""
     _test_text = ""
+    _channel = "jpush"
+    _appid = ""
+    _project_id = ""
+    _hw_category = "MARKETING"
+    _hw_service_account = None
+    _hw_token = ""
+    _hw_token_mode = ""
+    _hw_token_key = ""
+    _hw_token_expire_at = 0.0
 
     # ------------------------------------------------------------------ #
     # 生命周期
@@ -200,6 +344,35 @@ class AppPushMsg(_PluginBase):
         self._onlyonce = bool(config.get("onlyonce"))
         self._test_title = str(config.get("testtitle") or "").strip()
         self._test_text = str(config.get("testtext") or "").strip()
+        self._channel = str(config.get("channel") or "jpush").strip().lower()
+        if self._channel not in ("jpush", "huawei"):
+            self._channel = "jpush"
+        self._appid = str(config.get("appid") or "").strip()
+        self._project_id = str(config.get("project_id") or "").strip()
+        self._hw_category = str(config.get("huawei_category") or "MARKETING").strip() or "MARKETING"
+        sanitize_account = False
+        raw_account = config.get("service_account_json")
+        if isinstance(raw_account, str) and raw_account.strip():
+            account = _parse_service_account(raw_account)
+            if account:
+                self._hw_service_account = account
+                self._store_service_account(account)
+                sanitize_account = True
+            else:
+                logger.error("AppPushMsg 华为服务账号 JSON 解析失败（内容不记录）")
+                self._hw_service_account = None
+        else:
+            stored = self._read_data("huawei_service_account")
+            self._hw_service_account = stored if isinstance(stored, dict) else None
+        self._hw_token = ""
+        self._hw_token_mode = ""
+        self._hw_token_key = ""
+        self._hw_token_expire_at = 0.0
+        if sanitize_account:
+            try:
+                self.update_config(self._current_config())
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("AppPushMsg 清洗服务账号配置失败: {}".format(exc))
         if self._onlyonce:
             self._onlyonce = False
             try:
@@ -234,6 +407,11 @@ class AppPushMsg(_PluginBase):
             "testtitle": self._test_title,
             "testtext": self._test_text,
             "onlyonce": self._onlyonce,
+            "channel": self._channel,
+            "appid": self._appid,
+            "project_id": self._project_id,
+            "service_account_json": "",
+            "huawei_category": self._hw_category,
         }
 
     def _send_test_now(self) -> None:
@@ -256,12 +434,23 @@ class AppPushMsg(_PluginBase):
                         "props": {"model": "enabled", "label": "启用插件"},
                     },
                     {
+                        "component": "VSelect",
+                        "props": {
+                            "model": "channel",
+                            "label": "推送渠道",
+                            "items": [
+                                {"title": "极光 JPush", "value": "jpush"},
+                                {"title": "华为 Push Kit 直连", "value": "huawei"},
+                            ],
+                        },
+                    },
+                    {
                         "component": "VTextField",
                         "props": {"model": "apikey", "label": "Push Key"},
                     },
                     {
                         "component": "VTextField",
-                        "props": {"model": "token", "label": "App Push Token"},
+                        "props": {"model": "token", "label": "App Push Token（jpush=极光 Alias / huawei=华为 Push Token）"},
                     },
                     {
                         "component": "VTextField",
@@ -273,6 +462,31 @@ class AppPushMsg(_PluginBase):
                             "model": "mastersecret",
                             "label": "JPush Master Secret",
                             "type": "password",
+                        },
+                    },
+                    {
+                        "component": "VTextField",
+                        "props": {"model": "appid", "label": "华为 Client ID（appid，v3 备用）"},
+                    },
+                    {
+                        "component": "VTextField",
+                        "props": {"model": "project_id", "label": "华为项目 ID（projectId）"},
+                    },
+                    {
+                        "component": "VTextarea",
+                        "props": {
+                            "model": "service_account_json",
+                            "label": "华为服务账号 JSON（留空表示不修改，仅存服务端）",
+                            "rows": 4,
+                            "auto-grow": True,
+                        },
+                    },
+                    {
+                        "component": "VSelect",
+                        "props": {
+                            "model": "huawei_category",
+                            "label": "华为通知分类",
+                            "items": _huawei_category_options(),
                         },
                     },
                     {
@@ -310,6 +524,11 @@ class AppPushMsg(_PluginBase):
             "token": "",
             "appkey": "",
             "mastersecret": "",
+            "channel": "jpush",
+            "appid": "",
+            "project_id": "",
+            "service_account_json": "",
+            "huawei_category": "MARKETING",
             "msgtypes": [],
             "testtitle": "",
             "testtext": "",
@@ -456,10 +675,15 @@ class AppPushMsg(_PluginBase):
         return cols, attrs, elements
 
     def _dashboard_status_alert(self, stats: dict) -> dict:
-        configured = bool(self._enabled and self._appkey and self._mastersecret and self._token)
-        if not configured:
+        ready, ready_message = self._channel_ready()
+        configured = bool(self._enabled and ready)
+        channel_name = "华为 Push Kit" if self._channel == "huawei" else "极光 JPush"
+        if not self._enabled:
             alert_type = "warning"
-            text = "未就绪：请启用插件并配置极光 AppKey / Master Secret / App Push Token"
+            text = "未就绪：插件未启用"
+        elif not configured:
+            alert_type = "warning"
+            text = "未就绪（{}）：{}".format(channel_name, ready_message)
         elif stats.get("last_push_ok") is True:
             alert_type = "success"
             text = "连接正常：最近一次推送成功（{}）".format(stats.get("last_push_time") or "-")
@@ -539,8 +763,9 @@ class AppPushMsg(_PluginBase):
             if not isinstance(item, dict):
                 continue
             lines.append(
-                "[{}] {} · {} · {}：{}".format(
+                "[{}] {} · {} · {} · {}：{}".format(
                     item.get("time") or "-",
+                    "华为" if item.get("channel") == "huawei" else "极光",
                     item.get("kind") or "推送",
                     "成功" if item.get("ok") else "失败",
                     _truncate(item.get("title") or "-", 20),
@@ -573,15 +798,34 @@ class AppPushMsg(_PluginBase):
         self._record_event("测试", send_title, send_text, result, attempted)
         return result
 
+    def _channel_ready(self) -> Tuple[bool, str]:
+        """检查当前渠道的最小可用配置。"""
+        if self._channel == "huawei":
+            if not self._token:
+                return False, "未配置华为 Push Token"
+            account = self._hw_service_account
+            project_id = self._project_id or (
+                _coerce_str(account.get("project_id")) if isinstance(account, dict) else ""
+            )
+            if not project_id:
+                return False, "未配置华为项目 ID（projectId）"
+            if not isinstance(account, dict):
+                return False, "未配置华为服务账号 JSON"
+            return True, ""
+        if not self._token:
+            return False, "未配置 App Push Token"
+        if not self._appkey or not self._mastersecret:
+            return False, "未配置 JPush 服务端凭据"
+        return True, ""
+
     def _execute_test(self, apikey: str = None, title: str = None, text: str = None):
         if not self._enabled:
             return {"code": 1, "msg": "插件未启用"}, False
         if not self._apikey or (apikey or "").strip() != self._apikey.strip():
             return {"code": 1, "msg": "Push Key 校验失败"}, False
-        if not self._token:
-            return {"code": 1, "msg": "未配置 App Push Token"}, False
-        if not self._appkey or not self._mastersecret:
-            return {"code": 1, "msg": "未配置 JPush 服务端凭据"}, False
+        ready, ready_message = self._channel_ready()
+        if not ready:
+            return {"code": 1, "msg": ready_message}, False
         send_title = _coerce_str(title) or self._test_title or self.TEST_TITLE
         send_text = _coerce_str(text) or self._test_text or self.TEST_TEXT
         ok, message = self._push(send_title, send_text)
@@ -601,6 +845,13 @@ class AppPushMsg(_PluginBase):
             self.save_data(key, value)
         except Exception as exc:  # noqa: BLE001
             logger.debug("AppPushMsg 写入插件数据失败: {}".format(exc))
+
+    def _store_service_account(self, account: dict) -> None:
+        """服务账号 JSON 只落到插件数据，避免出现在配置响应中。"""
+        try:
+            self.save_data("huawei_service_account", account)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("AppPushMsg 保存华为服务账号失败: {}".format(exc))
 
     def _load_stats(self) -> dict:
         data = _default_stats()
@@ -637,6 +888,7 @@ class AppPushMsg(_PluginBase):
             {
                 "time": now,
                 "kind": kind,
+                "channel": self._channel,
                 "title": _truncate(title, 40),
                 "summary": _truncate(text, 80),
                 "ok": success,
@@ -685,7 +937,114 @@ class AppPushMsg(_PluginBase):
     # ------------------------------------------------------------------ #
     # 极光推送 v3
     # ------------------------------------------------------------------ #
-    def _push(
+    def _push(self, title: str, text: str, extras: Optional[dict] = None) -> Tuple[bool, str]:
+        """按配置渠道分发推送。"""
+        if self._channel == "huawei":
+            return self._push_huawei(title, text)
+        return self._push_jpush(title, text, extras)
+
+    def _push_huawei(self, title: str, text: str) -> Tuple[bool, str]:
+        """华为 Push Kit v3 直连推送。"""
+        if not self._token:
+            return False, "未配置华为 Push Token"
+        account = self._hw_service_account
+        project_id = self._project_id or (
+            _coerce_str(account.get("project_id")) if isinstance(account, dict) else ""
+        )
+        if not project_id:
+            return False, "未配置华为项目 ID（projectId）"
+        if not isinstance(account, dict):
+            return False, "未配置华为服务账号 JSON"
+        try:
+            token, mode = self._get_huawei_token()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("AppPushMsg 华为鉴权失败: {}".format(exc))
+            return False, "华为鉴权失败: {}".format(exc)
+        url = HUAWEI_PUSH_URL_TEMPLATE.format(project_id=project_id)
+        payload = _build_huawei_payload(title, text, self._hw_category, self._token)
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer {}".format(token),
+            "push-type": "0",
+        }
+        try:
+            response = RequestUtils().post(url, json=payload, headers=headers)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("AppPushMsg 华为推送请求异常: {}".format(exc))
+            return False, "推送请求异常: {}".format(exc)
+        if response is None:
+            return False, "推送网关无响应"
+        status = int(getattr(response, "status_code", 0) or 0)
+        try:
+            body = response.json()
+        except Exception:  # noqa: BLE001
+            body = {}
+        ok, message = _parse_huawei_response(status, body)
+        if ok:
+            logger.info("AppPushMsg 华为推送成功（{}）: {}".format(mode, message))
+        else:
+            logger.error("AppPushMsg 华为推送失败: {}".format(message))
+        return ok, message
+
+    def _get_huawei_token(self):
+        """获取华为鉴权令牌：优先 JWT 换 access_token，失败回退官方 JWT 直连。"""
+        account = self._hw_service_account
+        if not isinstance(account, dict):
+            raise ValueError("未配置华为服务账号 JSON")
+        cache_key = "{}|{}|{}".format(
+            _coerce_str(account.get("key_id")),
+            _coerce_str(account.get("sub_account")),
+            self._project_id,
+        )
+        now = time.time()
+        if (
+            self._hw_token
+            and self._hw_token_key == cache_key
+            and now < float(self._hw_token_expire_at or 0)
+        ):
+            return self._hw_token, self._hw_token_mode
+        assertion = _build_service_account_jwt(account)
+        exchanged = self._exchange_huawei_access_token(account, assertion)
+        if exchanged:
+            mode = "access_token"
+            value, expires_in = exchanged
+            ttl = max(60, int(expires_in or 3600) - 60)
+        else:
+            mode = "jwt"
+            value, ttl = assertion, 3300
+        self._hw_token = value
+        self._hw_token_mode = mode
+        self._hw_token_key = cache_key
+        self._hw_token_expire_at = now + ttl
+        logger.info("AppPushMsg 华为鉴权令牌已刷新（{}）".format(mode))
+        return value, mode
+
+    def _exchange_huawei_access_token(self, account: dict, assertion: str):
+        """用服务账号 JWT 换取 access_token；不可用时返回 None（回退 JWT 直连）。"""
+        token_uri = _coerce_str(account.get("token_uri")) or HUAWEI_DEFAULT_TOKEN_URI
+        try:
+            response = RequestUtils().post(
+                token_uri,
+                data={"grant_type": HUAWEI_JWT_BEARER_GRANT, "assertion": assertion},
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("AppPushMsg 华为 access_token 换取失败，回退 JWT 直连: {}".format(exc))
+            return None
+        if response is None:
+            return None
+        try:
+            body = response.json()
+        except Exception:  # noqa: BLE001
+            return None
+        if not isinstance(body, dict):
+            return None
+        access_token = _coerce_str(body.get("access_token"))
+        if not access_token:
+            return None
+        return access_token, body.get("expires_in") or 3300
+
+    def _push_jpush(
         self, title: str, text: str, extras: Optional[dict] = None
     ) -> Tuple[bool, str]:
         if not self._appkey or not self._mastersecret:

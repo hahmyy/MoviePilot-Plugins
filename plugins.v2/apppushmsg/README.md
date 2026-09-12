@@ -46,4 +46,16 @@
 - 支持消息类型多选筛选（媒体服务器/订阅/整理入库/资源下载/站点/手动处理/其它/智能体/插件），不选则转发全部。
 - 配置页可自定义测试标题与内容，并用“发送测试（保存后立即发送一条）”开关立即发送；测试接口支持 title/text 查询参数覆盖。
 - 图标：仓库根 `icons/AppPushMsg.png`（V2/V3 共用），索引 `icon` 字段一致。
-- 版本：`package.json` / `package.v2.json` 内 `AppPushMsg` 版本 0.1.5，与插件类 `plugin_version` 一致。
+- 版本：`package.json` / `package.v2.json` 内 `AppPushMsg` 版本 0.1.6，与插件类 `plugin_version` 一致。
+
+## 华为 Push Kit 直连渠道（可选）
+
+- `channel` 选 `huawei` 时，`token` 字段填华为 Push Token（不再是极光 Alias）。
+- 需配置 `project_id`（AGC 项目 ID）和 `service_account_json`（AGC 服务账号 JSON，含 key_id /
+  sub_account / private_key）；`appid` 为 Client ID，v3 接口不直接使用，仅作备用记录。
+- 服务端按华为官方文档生成 PS256 服务账号 JWT，优先换取 access_token（
+  grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer），换取不可用时回退官方支持的
+  JWT 直连方式；调用 `POST /v3/{projectId}/messages:send`，Header `push-type: 0`，
+  请求体为 `payload.notification{category,title,body}` + `target.token` + `pushOptions`。
+- 安全：服务账号 JSON 只存服务端插件数据，配置页不回显；日志、页面、仪表盘与 /run
+  响应都不会出现 private_key。
