@@ -39,8 +39,8 @@ def test_manifest_and_plugin_are_v2_aligned() -> None:
         if isinstance(node, ast.ImportFrom)
     }
 
-    assert manifest["version"] == "0.1.8"
-    assert 'plugin_version = "0.1.8"' in source
+    assert manifest["version"] == "0.1.9"
+    assert 'plugin_version = "0.1.9"' in source
     assert manifest["icon"] == "MoviePilotAppPush.png"
     assert (ROOT / "icons" / manifest["icon"]).is_file()
     assert "app.core.event" in imports
@@ -145,7 +145,7 @@ def test_v2_layouts_stay_identical() -> None:
 
     package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))["MoviePilotAppPush"]
     versioned_package = json.loads((ROOT / "package.v2.json").read_text(encoding="utf-8"))["MoviePilotAppPush"]
-    assert package["version"] == versioned_package["version"] == "0.1.8"
+    assert package["version"] == versioned_package["version"] == "0.1.9"
     assert package["icon"] == versioned_package["icon"] == "MoviePilotAppPush.png"
 
 
@@ -474,25 +474,29 @@ def test_huawei_missing_config_returns_readable_error() -> None:
     assert result["code"] != 0 and "华为" in result["msg"]
     assert "private_key" not in json.dumps(result, ensure_ascii=False)
 
-def test_form_only_shows_current_channel_fields() -> None:
-    """配置页按当前保存的渠道只返回对应字段，并支持上传服务账号 JSON。"""
+def test_form_shows_channel_fields_with_v_show_and_json_upload() -> None:
+    """配置页按渠道即时显示字段，并支持上传服务账号 JSON。"""
     module = _load_plugin()
+    plugin = _new_instance(module, {})
+    form, defaults = plugin.get_form()
+    components = form[0]["content"]
 
-    jpush_plugin = _new_instance(module, {"enabled": True, "channel": "jpush"})
-    jform, _ = jpush_plugin.get_form()
-    jmodels = [item.get("props", {}).get("model") for item in jform[0]["content"]]
-    assert "appkey" in jmodels and "mastersecret" in jmodels
-    assert "project_id" not in jmodels and "service_account_json" not in jmodels
+    def props_for(model):
+        for item in components:
+            if item.get("props", {}).get("model") == model:
+                return item["props"]
+        raise AssertionError("missing field: " + model)
 
-    huawei_plugin = _new_instance(module, {"enabled": True, "channel": "huawei"})
-    hform, defaults = huawei_plugin.get_form()
-    components = hform[0]["content"]
-    hmodels = [item.get("props", {}).get("model") for item in components]
-    assert "project_id" in hmodels and "service_account_json" in hmodels
-    assert "appkey" not in hmodels and "mastersecret" not in hmodels
+    assert props_for("appkey")["v-show"] == "channel !== 'huawei'"
+    assert props_for("mastersecret")["v-show"] == "channel !== 'huawei'"
+    assert props_for("project_id")["v-show"] == "channel === 'huawei'"
+    assert props_for("service_account_json")["v-show"] == "channel === 'huawei'"
+    assert props_for("huawei_category")["v-show"] == "channel === 'huawei'"
 
     file_inputs = [item for item in components if item.get("component") == "VFileInput"]
     assert len(file_inputs) == 1
-    handler = file_inputs[0]["props"]["onUpdate:modelValue"]
+    file_props = file_inputs[0]["props"]
+    assert file_props["v-show"] == "channel === 'huawei'"
+    handler = file_props["onUpdate:modelValue"]
     assert "service_account_json" in handler and "service_account_file" in handler
-    assert defaults["service_account_json"] == "" and defaults["service_account_file"] == ""
+    assert defaults["channel"] == "jpush" and defaults["service_account_file"] == ""

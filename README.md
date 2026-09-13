@@ -42,7 +42,7 @@ V3 专用实现仍放 `plugins.v3/<plugin_id_lower>/` 与 `package.v3.json`。
 
 | 插件 ID | 版本线 | 说明 |
 |---|---|---|
-| MoviePilotAppPush | V2 兼容 0.1.8（plugins/ 与 plugins.v2/ 双份）/ V3 1.0.8 | 把 MoviePilot 通知推送到鸿蒙/Android/iOS（系统级推送，极光 JPush v3）；插件详情页展示最近一次测试结果；插件页与首页仪表盘都展示调用次数、连接状态与历史消息；支持按消息类型筛选、自定义测试内容、极光 / 华为 Push Kit 双渠道；配置页按渠道条件显示字段 |
+| MoviePilotAppPush | V2 兼容 0.1.9（plugins/ 与 plugins.v2/ 双份）/ V3 1.0.9 | 把 MoviePilot 通知推送到鸿蒙/Android/iOS（系统级推送，极光 JPush v3）；插件详情页展示最近一次测试结果；插件页与首页仪表盘都展示调用次数、连接状态与历史消息；支持按消息类型筛选、自定义测试内容、极光 / 华为 Push Kit 双渠道；配置页切换渠道即时显示对应字段（App 端同样支持） |
 
 ## 新增/维护插件的步骤
 

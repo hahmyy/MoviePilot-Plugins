@@ -294,7 +294,7 @@ class MoviePilotAppPush(_PluginBase):
     plugin_name = "App 推送"
     plugin_desc = "将 MoviePilot 通知推送到鸿蒙/Android/iOS 客户端（系统级推送）。"
     plugin_icon = "MoviePilotAppPush.png"
-    plugin_version = "1.0.8"
+    plugin_version = "1.0.9"
     plugin_author = "hahmyy"
     author_url = "https://github.com/hahmyy"
     plugin_config_prefix = "moviepilotapppush_"
@@ -429,11 +429,7 @@ class MoviePilotAppPush(_PluginBase):
             loop.create_task(coro)
 
     def get_form(self) -> tuple[list[dict], dict[str, Any]]:
-        """配置页：按当前已保存的推送渠道只展示对应字段。"""
-        channel = "huawei" if self._channel == "huawei" else "jpush"
-        token_label = (
-            "华为 Push Token" if channel == "huawei" else "App Push Token（极光 Alias）"
-        )
+        """配置页：按推送渠道即时显示对应字段。"""
         head = [
             {
                 "component": "VAlert",
@@ -442,7 +438,7 @@ class MoviePilotAppPush(_PluginBase):
                     "variant": "tonal",
                     "density": "compact",
                     "class": "mb-2",
-                    "text": "切换推送渠道后请先保存，再重新打开配置页，只会显示该渠道需要的字段。",
+                    "text": "切换推送渠道后会立即显示对应字段：极光填 AppKey / Master Secret，华为填项目 ID 与服务账号 JSON。",
                 },
             },
             {"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件"}},
@@ -458,57 +454,80 @@ class MoviePilotAppPush(_PluginBase):
                 },
             },
             {"component": "VTextField", "props": {"model": "apikey", "label": "Push Key"}},
-            {"component": "VTextField", "props": {"model": "token", "label": token_label}},
+            {
+                "component": "VTextField",
+                "props": {
+                    "model": "token",
+                    "label": "App Push Token（jpush=极光 Alias / huawei=华为 Push Token）",
+                },
+            },
         ]
-        if channel == "huawei":
-            channel_fields = [
-                {
-                    "component": "VTextField",
-                    "props": {"model": "appid", "label": "华为 Client ID（appid，v3 备用）"},
+        jpush_fields = [
+            {
+                "component": "VTextField",
+                "props": {
+                    "model": "appkey",
+                    "label": "JPush AppKey",
+                    "v-show": "channel !== 'huawei'",
                 },
-                {
-                    "component": "VTextField",
-                    "props": {"model": "project_id", "label": "华为项目 ID（projectId）"},
+            },
+            {
+                "component": "VTextField",
+                "props": {
+                    "model": "mastersecret",
+                    "label": "JPush Master Secret",
+                    "type": "password",
+                    "v-show": "channel !== 'huawei'",
                 },
-                {
-                    "component": "VFileInput",
-                    "props": {
-                        "label": "上传服务账号 JSON（自动读取内容）",
-                        "accept": ".json,application/json",
-                        "prepend-icon": "mdi-upload",
-                        "onUpdate:modelValue": _SERVICE_ACCOUNT_UPLOAD_HANDLER,
-                    },
+            },
+        ]
+        huawei_fields = [
+            {
+                "component": "VTextField",
+                "props": {
+                    "model": "appid",
+                    "label": "华为 Client ID（appid，v3 备用）",
+                    "v-show": "channel === 'huawei'",
                 },
-                {
-                    "component": "VTextarea",
-                    "props": {
-                        "model": "service_account_json",
-                        "label": "华为服务账号 JSON（可粘贴或上传，留空表示不修改）",
-                        "rows": 4,
-                        "auto-grow": True,
-                    },
+            },
+            {
+                "component": "VTextField",
+                "props": {
+                    "model": "project_id",
+                    "label": "华为项目 ID（projectId）",
+                    "v-show": "channel === 'huawei'",
                 },
-                {
-                    "component": "VSelect",
-                    "props": {
-                        "model": "huawei_category",
-                        "label": "华为通知分类",
-                        "items": _huawei_category_options(),
-                    },
+            },
+            {
+                "component": "VFileInput",
+                "props": {
+                    "label": "上传服务账号 JSON（自动读取内容）",
+                    "accept": ".json,application/json",
+                    "prepend-icon": "mdi-upload",
+                    "v-show": "channel === 'huawei'",
+                    "onUpdate:modelValue": _SERVICE_ACCOUNT_UPLOAD_HANDLER,
                 },
-            ]
-        else:
-            channel_fields = [
-                {"component": "VTextField", "props": {"model": "appkey", "label": "JPush AppKey"}},
-                {
-                    "component": "VTextField",
-                    "props": {
-                        "model": "mastersecret",
-                        "label": "JPush Master Secret",
-                        "type": "password",
-                    },
+            },
+            {
+                "component": "VTextarea",
+                "props": {
+                    "model": "service_account_json",
+                    "label": "华为服务账号 JSON（可粘贴或上传，留空表示不修改）",
+                    "rows": 4,
+                    "auto-grow": True,
+                    "v-show": "channel === 'huawei'",
                 },
-            ]
+            },
+            {
+                "component": "VSelect",
+                "props": {
+                    "model": "huawei_category",
+                    "label": "华为通知分类",
+                    "items": _huawei_category_options(),
+                    "v-show": "channel === 'huawei'",
+                },
+            },
+        ]
         tail = [
             {
                 "component": "VSelect",
@@ -538,7 +557,7 @@ class MoviePilotAppPush(_PluginBase):
                 "props": {"model": "onlyonce", "label": "发送测试（保存后立即发送一条）"},
             },
         ]
-        return [{"component": "VForm", "content": head + channel_fields + tail}], {
+        return [{"component": "VForm", "content": head + jpush_fields + huawei_fields + tail}], {
             "enabled": False,
             "channel": "jpush",
             "apikey": "",
