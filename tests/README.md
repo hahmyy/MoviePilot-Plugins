@@ -29,8 +29,8 @@ tests/
 <python> tests/run.py
 
 # 只跑某个插件某代
-<python> -m pytest tests/v1/apppushmsg
-<python> -m pytest tests/v3/apppushmsg
+<python> -m pytest tests/v1/moviepilotapppush
+<python> -m pytest tests/v3/moviepilotapppush
 ```
 
 经典 `plugins/` 实现的兼容回归在 V3 后端的 v1 兼容会话中进行（与官方 CI 的做法

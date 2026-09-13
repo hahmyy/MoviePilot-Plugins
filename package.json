@@ -1,15 +1,17 @@
 {
-  "AppPushMsg": {
+  "MoviePilotAppPush": {
     "name": "App 推送",
     "description": "将 MoviePilot 通知推送到鸿蒙/Android/iOS 客户端（系统级推送）。",
     "labels": "通知,推送",
-    "version": "0.1.6",
-    "icon": "AppPushMsg.png",
+    "version": "0.1.8",
+    "icon": "MoviePilotAppPush.png",
     "author": "hahmyy",
     "level": 1,
     "v2": true,
     "v3": false,
     "history": {
+      "v0.1.8": "插件更名为 MoviePilotAppPush（避免与旧 ID 冲突）；配置页按已保存渠道只返回对应字段。",
+      "v0.1.7": "配置页按推送渠道条件显示字段；华为服务账号支持上传 JSON 自动识别。",
       "v0.1.6": "新增华为 Push Kit 直连渠道（服务账号 PS256 JWT / v3 messages:send），保留极光渠道。",
       "v0.1.5": "配置页新增自定义测试标题/内容与“立即发送测试”开关，测试接口支持 title/text 参数。",
       "v0.1.4": "Web 插件页直接展示连接状态、调用统计与历史消息，并保留最近一次测试结果。",

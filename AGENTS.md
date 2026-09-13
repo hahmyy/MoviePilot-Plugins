@@ -10,7 +10,7 @@ MoviePilot 宿主代码和测试为准；V2 兼容实现以 V2 宿主 SDK 与官
   - `plugins/<id_lower>/` + `package.json` 条目，声明 `"v2": true`；有 V3 副本时
     再声明 `"v3": false`（经典回退索引，兼容旧 V2 宿主）
 - V3 专用插件放在 `plugins.v3/<id_lower>/`，索引写入 `package.v3.json`。
-- 插件类名、目录名和索引 ID 必须保持对应，例如 `AppPushMsg` 对应 `apppushmsg/`。
+- 插件类名、目录名和索引 ID 必须保持对应，例如 `MoviePilotAppPush` 对应 `moviepilotapppush/`。
 - 插件版本、对应索引版本和 `history` 顶部版本必须一致；同一插件同时有 V2/V3 时，
   V3 主版本为 V2 主版本 + 1。
 
@@ -28,3 +28,11 @@ MoviePilot 宿主代码和测试为准；V2 兼容实现以 V2 宿主 SDK 与官
   `tests/v3/<id_lower>/`，测试导入必须走生产命名空间 `app.plugins.<plugin_id>`。
 - 提交前运行该插件的对应代测试与版本门禁（`package.json`、`package.v2.json`、
   `package.v3.json` 一并校验）。
+
+## 配置页排版约定
+
+- 渠道、类型等互斥配置优先在 `get_form()` 中按当前已保存的选择只返回对应字段，兼容不支持
+  `v-show` 的旧版前端；可以在返回字段上再用 `v-show` 做前端即时切换，但不能只靠 `v-show`
+  才隐藏字段。
+- 文件上传字段使用 `VFileInput` 搭配 `onUpdate:modelValue` 表达式，把文件内容读入文本字段；
+  表单 model 中不得保存 File 对象，避免配置序列化失败。

@@ -15,8 +15,8 @@ MoviePilot V2（v2.15.6 及同代）插件市场会同时读取两份索引并�
 为了让新旧 V2 宿主、以及配置了 GitHub 镜像/缓存的环境都能稳定获取，本仓的 V2
 兼容插件同时提供两份布局，源码必须保持一致（测试会校验两份文件完全相同）：
 
-- `plugins.v2/apppushmsg/` + `package.v2.json` 的 `AppPushMsg` 条目
-- `plugins/apppushmsg/` + `package.json` 的 `AppPushMsg` 条目（v2 为 true、v3 为 false）
+- `plugins.v2/moviepilotapppush/` + `package.v2.json` 的 `MoviePilotAppPush` 条目
+- `plugins/moviepilotapppush/` + `package.json` 的 `MoviePilotAppPush` 条目（v2 为 true、v3 为 false）
 
 V3 专用实现仍放 `plugins.v3/<plugin_id_lower>/` 与 `package.v3.json`。
 
@@ -33,8 +33,8 @@ V3 专用实现仍放 `plugins.v3/<plugin_id_lower>/` 与 `package.v3.json`。
 
 对应关系（与官方一致）：
 
-- 插件类名 = 插件 ID = package*.json 键名，例如 `AppPushMsg`
-- 目录名 = 类名小写，例如 `plugins/apppushmsg/`、`plugins.v2/apppushmsg/`、`plugins.v3/apppushmsg/`
+- 插件类名 = 插件 ID = package*.json 键名，例如 `MoviePilotAppPush`
+- 目录名 = 类名小写，例如 `plugins/moviepilotapppush/`、`plugins.v2/moviepilotapppush/`、`plugins.v3/moviepilotapppush/`
 - 插件类 `plugin_version`、对应索引 `version`、`history` 首项版本必须一致
 - 同一插件同时提供 V2/V3 时，V3 主版本须为 V2 主版本 + 1（官方版本门禁规则）
 
@@ -42,7 +42,7 @@ V3 专用实现仍放 `plugins.v3/<plugin_id_lower>/` 与 `package.v3.json`。
 
 | 插件 ID | 版本线 | 说明 |
 |---|---|---|
-| AppPushMsg | V2 兼容 0.1.6（plugins/ 与 plugins.v2/ 双份）/ V3 1.0.6 | 把 MoviePilot 通知推送到鸿蒙/Android/iOS（系统级推送，极光 JPush v3）；插件详情页展示最近一次测试结果；插件页与首页仪表盘都展示调用次数、连接状态与历史消息；支持按消息类型筛选、自定义测试内容、极光 / 华为 Push Kit 双渠道 |
+| MoviePilotAppPush | V2 兼容 0.1.8（plugins/ 与 plugins.v2/ 双份）/ V3 1.0.8 | 把 MoviePilot 通知推送到鸿蒙/Android/iOS（系统级推送，极光 JPush v3）；插件详情页展示最近一次测试结果；插件页与首页仪表盘都展示调用次数、连接状态与历史消息；支持按消息类型筛选、自定义测试内容、极光 / 华为 Push Kit 双渠道；配置页按渠道条件显示字段 |
 
 ## 新增/维护插件的步骤
 
@@ -86,8 +86,8 @@ MoviePilot 读取 GitHub 仓库的 main 分支；把本仓库推送到 GitHub �
 <python> tests/run.py
 
 # 只跑单个插件对应代测试
-<python> -m pytest tests/v1/apppushmsg
-<python> -m pytest tests/v3/apppushmsg
+<python> -m pytest tests/v1/moviepilotapppush
+<python> -m pytest tests/v3/moviepilotapppush
 ```
 
 更详细的测试说明见 `tests/README.md`。

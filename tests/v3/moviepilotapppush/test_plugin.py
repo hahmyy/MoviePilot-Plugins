@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""AppPushMsg V3 导入、版本线、接口合同与事件转发测试。"""
+"""MoviePilotAppPush V3 导入、版本线、接口合同与事件转发测试。"""
 
 from __future__ import annotations
 
@@ -10,25 +10,25 @@ import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
-SOURCE = ROOT / "plugins.v3/apppushmsg/__init__.py"
+SOURCE = ROOT / "plugins.v3/moviepilotapppush/__init__.py"
 MANIFEST = ROOT / "package.v3.json"
 
 
 def _load_plugin():
     """用生产命名空间导入插件（conftest 已注入 plugins.v3）。"""
-    return importlib.import_module("app.plugins.apppushmsg")
+    return importlib.import_module("app.plugins.moviepilotapppush")
 
 
 def _new_instance(module, config=None):
     """绕过宿主 Chain 运行上下文，只测插件自身逻辑。"""
-    plugin = object.__new__(module.AppPushMsg)
+    plugin = object.__new__(module.MoviePilotAppPush)
     plugin.init_plugin(config or {})
     return plugin
 
 
 def test_manifest_and_plugin_are_v3_aligned() -> None:
     """V3 索引、源码版本、图标与稳定 SDK 入口保持一致，且无旧路径导入。"""
-    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))["AppPushMsg"]
+    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))["MoviePilotAppPush"]
     source = SOURCE.read_text(encoding="utf-8")
     tree = ast.parse(source)
     imports = {
@@ -37,10 +37,10 @@ def test_manifest_and_plugin_are_v3_aligned() -> None:
         if isinstance(node, ast.ImportFrom)
     }
 
-    assert manifest["version"] == "1.0.6"
+    assert manifest["version"] == "1.0.8"
     assert manifest["system_version"] == ">=3.0.0"
-    assert 'plugin_version = "1.0.6"' in source
-    assert manifest["icon"] == "AppPushMsg.png"
+    assert 'plugin_version = "1.0.8"' in source
+    assert manifest["icon"] == "MoviePilotAppPush.png"
     assert (ROOT / "icons" / manifest["icon"]).is_file()
     assert not any(
         module.startswith(("app.core.", "app.helper.", "app.utils.", "app.log"))
@@ -129,7 +129,7 @@ def test_api_path_is_prefixed_with_plugin_id() -> None:
         plugin.__class__.__name__
     )
     assert len(apis) == 1
-    assert apis[0]["path"] == "/AppPushMsg/run"
+    assert apis[0]["path"] == "/MoviePilotAppPush/run"
     assert apis[0]["auth"] == "bear"
 
 
@@ -233,7 +233,7 @@ def test_dashboard_meta_and_message_type_filter() -> None:
         {"enabled": True, "token": "alias-device-1", "msgtypes": ["Subscribe"]},
     )
     meta = plugin.get_dashboard_meta()
-    assert meta and meta[0]["key"] == "apppushmsg_dashboard" and meta[0]["name"]
+    assert meta and meta[0]["key"] == "moviepilotapppush_dashboard" and meta[0]["name"]
 
     form, defaults = plugin.get_form()
     assert '"model": "msgtypes"' in json.dumps(form, ensure_ascii=False)
@@ -518,3 +518,26 @@ def test_huawei_missing_config_returns_readable_error() -> None:
     result = asyncio.run(plugin.run(apikey="k"))
     assert result["code"] != 0 and "华为" in result["msg"]
     assert "private_key" not in json.dumps(result, ensure_ascii=False)
+
+def test_form_only_shows_current_channel_fields() -> None:
+    """配置页按当前保存的渠道只返回对应字段，并支持上传服务账号 JSON。"""
+    module = _load_plugin()
+
+    jpush_plugin = _new_instance(module, {"enabled": True, "channel": "jpush"})
+    jform, _ = jpush_plugin.get_form()
+    jmodels = [item.get("props", {}).get("model") for item in jform[0]["content"]]
+    assert "appkey" in jmodels and "mastersecret" in jmodels
+    assert "project_id" not in jmodels and "service_account_json" not in jmodels
+
+    huawei_plugin = _new_instance(module, {"enabled": True, "channel": "huawei"})
+    hform, defaults = huawei_plugin.get_form()
+    components = hform[0]["content"]
+    hmodels = [item.get("props", {}).get("model") for item in components]
+    assert "project_id" in hmodels and "service_account_json" in hmodels
+    assert "appkey" not in hmodels and "mastersecret" not in hmodels
+
+    file_inputs = [item for item in components if item.get("component") == "VFileInput"]
+    assert len(file_inputs) == 1
+    handler = file_inputs[0]["props"]["onUpdate:modelValue"]
+    assert "service_account_json" in handler and "service_account_file" in handler
+    assert defaults["service_account_json"] == "" and defaults["service_account_file"] == ""

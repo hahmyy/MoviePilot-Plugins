@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""AppPushMsg V2 导入、版本线、接口合同与事件转发测试。
+"""MoviePilotAppPush V2 导入、版本线、接口合同与事件转发测试。
 
 V2 兼容插件放在经典 plugins/ 目录（官方约定由 tests/v1 代会话承载），测试在 V3 后端的兼容会话中运行（conftest 注入
 plugins/），与上游 CI 对经典兼容插件的回归方式一致。
@@ -12,25 +12,25 @@ import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
-SOURCE = ROOT / "plugins/apppushmsg/__init__.py"
+SOURCE = ROOT / "plugins/moviepilotapppush/__init__.py"
 MANIFEST = ROOT / "package.json"
 
 
 def _load_plugin():
     """用生产命名空间导入插件（conftest 已注入 plugins/）。"""
-    return importlib.import_module("app.plugins.apppushmsg")
+    return importlib.import_module("app.plugins.moviepilotapppush")
 
 
 def _new_instance(module, config=None):
     """绕过宿主 Chain 运行上下文，只测插件自身逻辑。"""
-    plugin = object.__new__(module.AppPushMsg)
+    plugin = object.__new__(module.MoviePilotAppPush)
     plugin.init_plugin(config or {})
     return plugin
 
 
 def test_manifest_and_plugin_are_v2_aligned() -> None:
     """V2 索引、源码版本、图标与 V2 SDK 入口保持一致。"""
-    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))["AppPushMsg"]
+    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))["MoviePilotAppPush"]
     source = SOURCE.read_text(encoding="utf-8")
     tree = ast.parse(source)
     imports = {
@@ -39,9 +39,9 @@ def test_manifest_and_plugin_are_v2_aligned() -> None:
         if isinstance(node, ast.ImportFrom)
     }
 
-    assert manifest["version"] == "0.1.6"
-    assert 'plugin_version = "0.1.6"' in source
-    assert manifest["icon"] == "AppPushMsg.png"
+    assert manifest["version"] == "0.1.8"
+    assert 'plugin_version = "0.1.8"' in source
+    assert manifest["icon"] == "MoviePilotAppPush.png"
     assert (ROOT / "icons" / manifest["icon"]).is_file()
     assert "app.core.event" in imports
     assert "app.log" in imports
@@ -125,7 +125,7 @@ def test_api_path_is_prefixed_with_plugin_id() -> None:
         plugin.__class__.__name__
     )
     assert len(apis) == 1
-    assert apis[0]["path"] == "/AppPushMsg/run"
+    assert apis[0]["path"] == "/MoviePilotAppPush/run"
     assert apis[0]["auth"] == "bear"
 
 
@@ -139,14 +139,14 @@ def test_stop_service_is_idempotent() -> None:
 
 def test_v2_layouts_stay_identical() -> None:
     """经典 plugins/ 与版本化 plugins.v2/ 的 V2 实现必须保持一致。"""
-    classic = (ROOT / "plugins/apppushmsg/__init__.py").read_bytes()
-    versioned = (ROOT / "plugins.v2/apppushmsg/__init__.py").read_bytes()
+    classic = (ROOT / "plugins/moviepilotapppush/__init__.py").read_bytes()
+    versioned = (ROOT / "plugins.v2/moviepilotapppush/__init__.py").read_bytes()
     assert classic == versioned
 
-    package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))["AppPushMsg"]
-    versioned_package = json.loads((ROOT / "package.v2.json").read_text(encoding="utf-8"))["AppPushMsg"]
-    assert package["version"] == versioned_package["version"] == "0.1.6"
-    assert package["icon"] == versioned_package["icon"] == "AppPushMsg.png"
+    package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))["MoviePilotAppPush"]
+    versioned_package = json.loads((ROOT / "package.v2.json").read_text(encoding="utf-8"))["MoviePilotAppPush"]
+    assert package["version"] == versioned_package["version"] == "0.1.8"
+    assert package["icon"] == versioned_package["icon"] == "MoviePilotAppPush.png"
 
 
 def test_run_records_last_result_and_page_shows_it() -> None:
@@ -228,7 +228,7 @@ def test_dashboard_meta_and_message_type_filter() -> None:
         {"enabled": True, "token": "alias-device-1", "msgtypes": ["Subscribe"]},
     )
     meta = plugin.get_dashboard_meta()
-    assert meta and meta[0]["key"] == "apppushmsg_dashboard" and meta[0]["name"]
+    assert meta and meta[0]["key"] == "moviepilotapppush_dashboard" and meta[0]["name"]
 
     form, defaults = plugin.get_form()
     form_text = json.dumps(form, ensure_ascii=False)
@@ -473,3 +473,26 @@ def test_huawei_missing_config_returns_readable_error() -> None:
     result = plugin.run(apikey="k")
     assert result["code"] != 0 and "华为" in result["msg"]
     assert "private_key" not in json.dumps(result, ensure_ascii=False)
+
+def test_form_only_shows_current_channel_fields() -> None:
+    """配置页按当前保存的渠道只返回对应字段，并支持上传服务账号 JSON。"""
+    module = _load_plugin()
+
+    jpush_plugin = _new_instance(module, {"enabled": True, "channel": "jpush"})
+    jform, _ = jpush_plugin.get_form()
+    jmodels = [item.get("props", {}).get("model") for item in jform[0]["content"]]
+    assert "appkey" in jmodels and "mastersecret" in jmodels
+    assert "project_id" not in jmodels and "service_account_json" not in jmodels
+
+    huawei_plugin = _new_instance(module, {"enabled": True, "channel": "huawei"})
+    hform, defaults = huawei_plugin.get_form()
+    components = hform[0]["content"]
+    hmodels = [item.get("props", {}).get("model") for item in components]
+    assert "project_id" in hmodels and "service_account_json" in hmodels
+    assert "appkey" not in hmodels and "mastersecret" not in hmodels
+
+    file_inputs = [item for item in components if item.get("component") == "VFileInput"]
+    assert len(file_inputs) == 1
+    handler = file_inputs[0]["props"]["onUpdate:modelValue"]
+    assert "service_account_json" in handler and "service_account_file" in handler
+    assert defaults["service_account_json"] == "" and defaults["service_account_file"] == ""

@@ -1,12 +1,19 @@
+# -*- coding: utf-8 -*-
+"""MoviePilot V2 版 MoviePilotAppPush：把 MoviePilot 通知推送到鸿蒙/Android/iOS（系统级推送）。
+
+与 plugins.v3/moviepilotapppush 功能一致，按 V2 宿主 SDK 实现：
+- 事件与 logger 走 app.core.event / app.log；
+- HTTP 走 app.utils.http.RequestUtils（requests，同步）；
+- 事件处理器为同步方法，由 V2 eventmanager 放入线程池执行。
+"""
 from __future__ import annotations
 
-import asyncio
 import base64
 import json
 import time
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from cryptography.hazmat.primitives import hashes, serialization
@@ -16,11 +23,11 @@ except Exception:  # pragma: no cover - 运行期由 _build_service_account_jwt 
     serialization = None
     padding = None
 
+from app.core.event import Event, eventmanager
+from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas.types import EventType, NotificationType
-from app.sdk.events import Event, eventmanager
-from app.sdk.logging import logger
-from app.sdk.network import AsyncRequestUtils
+from app.utils.http import RequestUtils
 
 
 def _coerce_str(value: Any) -> str:
@@ -92,7 +99,7 @@ def _event_data_to_dict(data: Any) -> dict:
 
 def _build_extras(event_data: dict) -> dict:
     """从 NoticeMessage 事件数据中提取可下发的扩展字段。"""
-    extras: dict[str, str] = {}
+    extras: Dict[str, str] = {}
     for key in ("channel", "type", "source", "userid"):
         value = event_data.get(key)
         if value is None:
@@ -212,6 +219,16 @@ def _build_service_account_jwt(account: dict, now: int = None) -> str:
     return "{}.{}".format(signing_input, _b64url(signature))
 
 
+# 前端 VFileInput 上传回调：把文件内容读入 service_account_json 文本字段，
+# 模型里不保存 File 对象（FormRender 会以 with(model) 作用域执行该表达式）。
+_SERVICE_ACCOUNT_UPLOAD_HANDLER = (
+    "(files) => { const f = Array.isArray(files) ? files[0] : files; "
+    "if (!f) { return; } const reader = new FileReader(); "
+    "reader.onload = function () { service_account_json = String(reader.result || ''); "
+    "service_account_file = f.name; }; reader.readAsText(f, 'utf-8'); }"
+)
+
+
 def _huawei_category_options() -> list:
     """华为通知分类选项（官方文档取值）。"""
     return [{"title": item, "value": item} for item in HUAWEI_CATEGORIES]
@@ -250,8 +267,8 @@ def _parse_huawei_response(status: int, body: Any) -> tuple:
 def _compose_notification(title: str, text: str, extras: dict) -> dict:
     """按极光 v3 结构拼装多平台通知体。
 
-    - 标题、正文都有时：android/hmos 使用系统标题 + 正文，
-      iOS 由于 APNs 只有 alert，把标题拼在正文前保证不丢信息。
+    - 标题、正文都有时：android/hmos 使用系统标题 + 正文，iOS 由于 APNs 只有
+      alert，把标题拼在正文前保证不丢信息。
     - 只有标题或只有正文时：统一走 notification.alert。
     - hmos 按厂商通道规范带 category（IM），鸿蒙厂商通道必填。
     """
@@ -261,7 +278,7 @@ def _compose_notification(title: str, text: str, extras: dict) -> dict:
         return {
             "alert": text,
             "android": {"alert": text, "title": title, "extras": extras},
-            "ios": {"alert": f"{title}\n{text}", "extras": extras},
+            "ios": {"alert": "{}\n{}".format(title, text), "extras": extras},
             "hmos": {
                 "alert": text,
                 "title": title,
@@ -272,23 +289,32 @@ def _compose_notification(title: str, text: str, extras: dict) -> dict:
     return {"alert": title or text, "extras": extras}
 
 
-class AppPushMsg(_PluginBase):
+class MoviePilotAppPush(_PluginBase):
     """把 MoviePilot 通知推送到鸿蒙/Android/iOS 客户端（系统级推送）。
 
     设计约定：
-    - 插件 ID 必须为 AppPushMsg（App 端据此渲染专用配置页并调用 /run 测试接口）。
+    - 插件 ID 必须为 MoviePilotAppPush（App 端据此渲染专用配置页并调用 /run 测试接口）。
     - App Push Token 即极光 Alias，App 端点“应用”后写入设备。
     - 服务端凭据 appkey / mastersecret 只在服务端配置，不下发、不打印。
     """
 
+    # 插件名称
     plugin_name = "App 推送"
+    # 插件描述
     plugin_desc = "将 MoviePilot 通知推送到鸿蒙/Android/iOS 客户端（系统级推送）。"
-    plugin_icon = "AppPushMsg.png"
-    plugin_version = "1.0.6"
+    # 插件图标
+    plugin_icon = "MoviePilotAppPush.png"
+    # 插件版本
+    plugin_version = "0.1.8"
+    # 插件作者
     plugin_author = "hahmyy"
+    # 作者主页
     author_url = "https://github.com/hahmyy"
-    plugin_config_prefix = "apppushmsg_"
+    # 插件配置项ID前缀
+    plugin_config_prefix = "moviepilotapppush_"
+    # 加载顺序
     plugin_order = 50
+    # 可使用的用户级别
     auth_level = 1
 
     JPUSH_PUSH_URL = "https://api.jpush.cn/v3/push"
@@ -317,7 +343,7 @@ class AppPushMsg(_PluginBase):
     # ------------------------------------------------------------------ #
     # 生命周期
     # ------------------------------------------------------------------ #
-    def init_plugin(self, config: dict | None = None) -> None:
+    def init_plugin(self, config: dict = None) -> None:
         config = config or {}
         self._enabled = bool(config.get("enabled"))
         self._apikey = str(config.get("apikey") or "")
@@ -343,7 +369,7 @@ class AppPushMsg(_PluginBase):
                 self._store_service_account(account)
                 sanitize_account = True
             else:
-                logger.error("AppPushMsg 华为服务账号 JSON 解析失败（内容不记录）")
+                logger.error("MoviePilotAppPush 华为服务账号 JSON 解析失败（内容不记录）")
                 self._hw_service_account = None
         else:
             stored = self._read_data("huawei_service_account")
@@ -356,13 +382,13 @@ class AppPushMsg(_PluginBase):
             try:
                 self.update_config(self._current_config())
             except Exception as exc:  # noqa: BLE001
-                logger.debug("AppPushMsg 清洗服务账号配置失败: {}".format(exc))
+                logger.debug("MoviePilotAppPush 清洗服务账号配置失败: {}".format(exc))
         if self._onlyonce:
             self._onlyonce = False
             try:
                 self.update_config(self._current_config())
             except Exception as exc:  # noqa: BLE001
-                logger.debug(f"AppPushMsg 重置测试开关失败: {exc}")
+                logger.debug("MoviePilotAppPush 重置测试开关失败: {}".format(exc))
             self._send_test_now()
 
     def get_state(self) -> bool:
@@ -376,7 +402,7 @@ class AppPushMsg(_PluginBase):
     # 页面与配置
     # ------------------------------------------------------------------ #
     @staticmethod
-    def get_command() -> list[dict[str, Any]]:
+    def get_command() -> List[Dict[str, Any]]:
         return []
 
     def _current_config(self) -> dict:
@@ -395,132 +421,140 @@ class AppPushMsg(_PluginBase):
             "appid": self._appid,
             "project_id": self._project_id,
             "service_account_json": "",
+            "service_account_file": "",
             "huawei_category": self._hw_category,
         }
 
-    async def _send_test_async(self) -> None:
+    def _send_test_now(self) -> None:
         """按自定义内容立即发送一条测试通知。"""
         title = self._test_title or self.TEST_TITLE
         text = self._test_text or self.TEST_TEXT
-        ok, message = await self._push(title, text)
-        await self._record_event(
+        ok, message = self._push(title, text)
+        self._record_event(
             "测试", title, text, {"code": 0 if ok else 1, "msg": message}, True
         )
 
-    def _send_test_now(self) -> None:
-        """在同步的 init_plugin 中执行或调度一次测试发送。"""
-        coro = self._send_test_async()
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            asyncio.run(coro)
-        else:
-            loop.create_task(coro)
-
-    def get_form(self) -> tuple[list[dict], dict[str, Any]]:
-        return [
+    def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
+        """配置页：按当前已保存的推送渠道只展示对应字段。"""
+        channel = "huawei" if self._channel == "huawei" else "jpush"
+        token_label = (
+            "华为 Push Token" if channel == "huawei" else "App Push Token（极光 Alias）"
+        )
+        head = [
             {
-                "component": "VForm",
-                "content": [
-                    {
-                        "component": "VSwitch",
-                        "props": {"model": "enabled", "label": "启用插件"},
+                "component": "VAlert",
+                "props": {
+                    "type": "info",
+                    "variant": "tonal",
+                    "density": "compact",
+                    "class": "mb-2",
+                    "text": "切换推送渠道后请先保存，再重新打开配置页，只会显示该渠道需要的字段。",
+                },
+            },
+            {"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件"}},
+            {
+                "component": "VSelect",
+                "props": {
+                    "model": "channel",
+                    "label": "推送渠道",
+                    "items": [
+                        {"title": "极光 JPush", "value": "jpush"},
+                        {"title": "华为 Push Kit 直连", "value": "huawei"},
+                    ],
+                },
+            },
+            {"component": "VTextField", "props": {"model": "apikey", "label": "Push Key"}},
+            {"component": "VTextField", "props": {"model": "token", "label": token_label}},
+        ]
+        if channel == "huawei":
+            channel_fields = [
+                {
+                    "component": "VTextField",
+                    "props": {"model": "appid", "label": "华为 Client ID（appid，v3 备用）"},
+                },
+                {
+                    "component": "VTextField",
+                    "props": {"model": "project_id", "label": "华为项目 ID（projectId）"},
+                },
+                {
+                    "component": "VFileInput",
+                    "props": {
+                        "label": "上传服务账号 JSON（自动读取内容）",
+                        "accept": ".json,application/json",
+                        "prepend-icon": "mdi-upload",
+                        "onUpdate:modelValue": _SERVICE_ACCOUNT_UPLOAD_HANDLER,
                     },
-                    {
-                        "component": "VSelect",
-                        "props": {
-                            "model": "channel",
-                            "label": "推送渠道",
-                            "items": [
-                                {"title": "极光 JPush", "value": "jpush"},
-                                {"title": "华为 Push Kit 直连", "value": "huawei"},
-                            ],
-                        },
+                },
+                {
+                    "component": "VTextarea",
+                    "props": {
+                        "model": "service_account_json",
+                        "label": "华为服务账号 JSON（可粘贴或上传，留空表示不修改）",
+                        "rows": 4,
+                        "auto-grow": True,
                     },
-                    {
-                        "component": "VTextField",
-                        "props": {"model": "apikey", "label": "Push Key"},
+                },
+                {
+                    "component": "VSelect",
+                    "props": {
+                        "model": "huawei_category",
+                        "label": "华为通知分类",
+                        "items": _huawei_category_options(),
                     },
-                    {
-                        "component": "VTextField",
-                        "props": {"model": "token", "label": "App Push Token（jpush=极光 Alias / huawei=华为 Push Token）"},
+                },
+            ]
+        else:
+            channel_fields = [
+                {"component": "VTextField", "props": {"model": "appkey", "label": "JPush AppKey"}},
+                {
+                    "component": "VTextField",
+                    "props": {
+                        "model": "mastersecret",
+                        "label": "JPush Master Secret",
+                        "type": "password",
                     },
-                    {
-                        "component": "VTextField",
-                        "props": {"model": "appkey", "label": "JPush AppKey"},
-                    },
-                    {
-                        "component": "VTextField",
-                        "props": {
-                            "model": "mastersecret",
-                            "label": "JPush Master Secret",
-                            "type": "password",
-                        },
-                    },
-                    {
-                        "component": "VTextField",
-                        "props": {"model": "appid", "label": "华为 Client ID（appid，v3 备用）"},
-                    },
-                    {
-                        "component": "VTextField",
-                        "props": {"model": "project_id", "label": "华为项目 ID（projectId）"},
-                    },
-                    {
-                        "component": "VTextarea",
-                        "props": {
-                            "model": "service_account_json",
-                            "label": "华为服务账号 JSON（留空表示不修改，仅存服务端）",
-                            "rows": 4,
-                            "auto-grow": True,
-                        },
-                    },
-                    {
-                        "component": "VSelect",
-                        "props": {
-                            "model": "huawei_category",
-                            "label": "华为通知分类",
-                            "items": _huawei_category_options(),
-                        },
-                    },
-                    {
-                        "component": "VSelect",
-                        "props": {
-                            "multiple": True,
-                            "chips": True,
-                            "model": "msgtypes",
-                            "label": "消息类型（不选则转发全部）",
-                            "items": _notification_type_options(),
-                        },
-                    },
-                    {
-                        "component": "VTextField",
-                        "props": {"model": "testtitle", "label": "测试标题（留空用默认）"},
-                    },
-                    {
-                        "component": "VTextarea",
-                        "props": {
-                            "model": "testtext",
-                            "label": "测试内容（留空用默认）",
-                            "rows": 2,
-                            "auto-grow": True,
-                        },
-                    },
-                    {
-                        "component": "VSwitch",
-                        "props": {"model": "onlyonce", "label": "发送测试（保存后立即发送一条）"},
-                    },
-                ],
-            }
-        ], {
+                },
+            ]
+        tail = [
+            {
+                "component": "VSelect",
+                "props": {
+                    "multiple": True,
+                    "chips": True,
+                    "model": "msgtypes",
+                    "label": "消息类型（不选则转发全部）",
+                    "items": _notification_type_options(),
+                },
+            },
+            {
+                "component": "VTextField",
+                "props": {"model": "testtitle", "label": "测试标题（留空用默认）"},
+            },
+            {
+                "component": "VTextarea",
+                "props": {
+                    "model": "testtext",
+                    "label": "测试内容（留空用默认）",
+                    "rows": 2,
+                    "auto-grow": True,
+                },
+            },
+            {
+                "component": "VSwitch",
+                "props": {"model": "onlyonce", "label": "发送测试（保存后立即发送一条）"},
+            },
+        ]
+        return [{"component": "VForm", "content": head + channel_fields + tail}], {
             "enabled": False,
+            "channel": "jpush",
             "apikey": "",
             "token": "",
             "appkey": "",
             "mastersecret": "",
-            "channel": "jpush",
             "appid": "",
             "project_id": "",
             "service_account_json": "",
+            "service_account_file": "",
             "huawei_category": "MARKETING",
             "msgtypes": [],
             "testtitle": "",
@@ -528,11 +562,11 @@ class AppPushMsg(_PluginBase):
             "onlyonce": False,
         }
 
-    def get_page(self) -> list[dict]:
+    def get_page(self) -> List[dict]:
         """插件详情页：展示最近一次测试结果与运行统计。"""
         return self._build_last_test_card() + self._build_dashboard_elements()
 
-    def _build_last_test_card(self) -> list[dict]:
+    def _build_last_test_card(self) -> List[dict]:
         """构建最近一次测试结果卡片。"""
         result = self._read_data("last_test_result")
         if not isinstance(result, dict) or not result:
@@ -585,7 +619,7 @@ class AppPushMsg(_PluginBase):
     # ------------------------------------------------------------------ #
     # 仪表盘：调用次数、连接状态与历史消息
     # ------------------------------------------------------------------ #
-    def _build_dashboard_elements(self) -> list[dict]:
+    def _build_dashboard_elements(self) -> List[dict]:
         """构建仪表盘与详情页共用的统计元素。"""
         stats = self._load_stats()
         history = self._read_data("push_history")
@@ -651,11 +685,11 @@ class AppPushMsg(_PluginBase):
             },
         ]
 
-    def get_dashboard_meta(self) -> list[dict[str, str]]:
+    def get_dashboard_meta(self) -> List[Dict[str, str]]:
         """声明仪表盘入口，供宿主仪表盘列表展示。"""
-        return [{"key": "apppushmsg_dashboard", "name": "App 推送统计"}]
+        return [{"key": "moviepilotapppush_dashboard", "name": "App 推送统计"}]
 
-    def get_dashboard(self, key: str | None = None, **kwargs):
+    def get_dashboard(self, key: str = None, **kwargs):
         """返回插件仪表盘：调用统计、连接状态与最近消息。"""
         elements = self._build_dashboard_elements()
         cols = {"cols": 12, "md": 6}
@@ -769,9 +803,9 @@ class AppPushMsg(_PluginBase):
 
     # ------------------------------------------------------------------ #
     # API：App 配置页“测试”按钮调用
-    # 最终路径：/api/v1/plugin/AppPushMsg/run
+    # 最终路径：/api/v1/plugin/MoviePilotAppPush/run
     # ------------------------------------------------------------------ #
-    def get_api(self) -> list[dict[str, Any]]:
+    def get_api(self) -> List[Dict[str, Any]]:
         return [
             {
                 "path": "/run",
@@ -779,24 +813,19 @@ class AppPushMsg(_PluginBase):
                 "methods": ["GET"],
                 "auth": "bear",
                 "summary": "发送一条测试推送",
-                "description": (
-                    "App 配置页「测试」按钮调用。校验 apikey 后，"
-                    "向配置的 token(Alias) 推送一条测试通知。"
-                ),
+                "description": "App 配置页「测试」按钮调用。校验 apikey 后，向配置的 token(Alias) 推送一条测试通知。",
             }
         ]
 
-    async def run(
-        self, apikey: str | None = None, title: str | None = None, text: str | None = None
-    ) -> dict[str, Any]:
+    def run(self, apikey: str = None, title: str = None, text: str = None) -> dict:
         """测试接口：校验 apikey 后发送测试通知，并记录最近一次结果。"""
         send_title = _coerce_str(title) or self._test_title or self.TEST_TITLE
         send_text = _coerce_str(text) or self._test_text or self.TEST_TEXT
-        result, attempted = await self._execute_test(apikey, title, text)
-        await self._record_event("测试", send_title, send_text, result, attempted)
+        result, attempted = self._execute_test(apikey, title, text)
+        self._record_event("测试", send_title, send_text, result, attempted)
         return result
 
-    def _channel_ready(self) -> tuple[bool, str]:
+    def _channel_ready(self) -> Tuple[bool, str]:
         """检查当前渠道的最小可用配置。"""
         if self._channel == "huawei":
             if not self._token:
@@ -816,9 +845,7 @@ class AppPushMsg(_PluginBase):
             return False, "未配置 JPush 服务端凭据"
         return True, ""
 
-    async def _execute_test(
-        self, apikey: str | None = None, title: str | None = None, text: str | None = None
-    ):
+    def _execute_test(self, apikey: str = None, title: str = None, text: str = None):
         if not self._enabled:
             return {"code": 1, "msg": "插件未启用"}, False
         if not self._apikey or (apikey or "").strip() != self._apikey.strip():
@@ -828,7 +855,7 @@ class AppPushMsg(_PluginBase):
             return {"code": 1, "msg": ready_message}, False
         send_title = _coerce_str(title) or self._test_title or self.TEST_TITLE
         send_text = _coerce_str(text) or self._test_text or self.TEST_TEXT
-        ok, message = await self._push(send_title, send_text)
+        ok, message = self._push(send_title, send_text)
         return {"code": 0 if ok else 1, "msg": message}, True
 
 
@@ -839,19 +866,19 @@ class AppPushMsg(_PluginBase):
         except Exception:  # noqa: BLE001
             return None
 
-    async def _write_data(self, key: str, value) -> None:
+    def _write_data(self, key: str, value) -> None:
         """写插件数据，失败只记日志、不影响推送主流程。"""
         try:
-            await self.async_save_data(key, value)
+            self.save_data(key, value)
         except Exception as exc:  # noqa: BLE001
-            logger.debug(f"AppPushMsg 写入插件数据失败: {exc}")
+            logger.debug("MoviePilotAppPush 写入插件数据失败: {}".format(exc))
 
     def _store_service_account(self, account: dict) -> None:
         """服务账号 JSON 只落到插件数据，避免出现在配置响应中。"""
         try:
             self.save_data("huawei_service_account", account)
         except Exception as exc:  # noqa: BLE001
-            logger.debug(f"AppPushMsg 保存华为服务账号失败: {exc}")
+            logger.debug("MoviePilotAppPush 保存华为服务账号失败: {}".format(exc))
 
     def _load_stats(self) -> dict:
         data = _default_stats()
@@ -862,7 +889,7 @@ class AppPushMsg(_PluginBase):
                     data[key] = stored[key]
         return data
 
-    async def _record_event(self, kind: str, title: str, text: str, result: dict, attempted: bool) -> None:
+    def _record_event(self, kind: str, title: str, text: str, result: dict, attempted: bool) -> None:
         """记录一次测试或通知推送，更新统计与历史。"""
         stats = self._load_stats()
         now = _now_str()
@@ -895,10 +922,10 @@ class AppPushMsg(_PluginBase):
                 "message": _truncate(result.get("msg"), 120),
             },
         )
-        await self._write_data("push_stats", stats)
-        await self._write_data("push_history", history)
+        self._write_data("push_stats", stats)
+        self._write_data("push_history", history)
         if kind == "测试":
-            await self._write_data(
+            self._write_data(
                 "last_test_result",
                 {
                     "time": now,
@@ -910,11 +937,10 @@ class AppPushMsg(_PluginBase):
 
     # ------------------------------------------------------------------ #
     # 事件：转发服务端消息通知
-    # 宿主 V3 eventmanager 对异步 handler 在主事件循环中 await（见
-    # app/runtime/event/dispatch.py dispatch_broadcast），无需 create_task。
+    # V2 eventmanager 对同步 handler 在线程池执行，方法保持同步、不做网络等待。
     # ------------------------------------------------------------------ #
     @eventmanager.register(EventType.NoticeMessage)
-    async def _on_notice(self, event: Event) -> None:
+    def _on_notice(self, event: Event) -> None:
         if not self._enabled or not self._token:
             return
         data = _event_data_to_dict(event.event_data)
@@ -924,10 +950,10 @@ class AppPushMsg(_PluginBase):
             return
         type_name = _notification_type_name(data.get("type"))
         if type_name and self._msgtypes and type_name not in self._msgtypes:
-            logger.debug("AppPushMsg 消息类型 {} 未开启转发，已跳过".format(type_name))
+            logger.debug("MoviePilotAppPush 消息类型 {} 未开启转发，已跳过".format(type_name))
             return
-        ok, message = await self._push(title, text, extras=_build_extras(data))
-        await self._record_event(
+        ok, message = self._push(title, text, extras=_build_extras(data))
+        self._record_event(
             "通知",
             title,
             text,
@@ -938,15 +964,13 @@ class AppPushMsg(_PluginBase):
     # ------------------------------------------------------------------ #
     # 极光推送 v3
     # ------------------------------------------------------------------ #
-    async def _push(
-        self, title: str, text: str, extras: dict | None = None
-    ) -> tuple[bool, str]:
+    def _push(self, title: str, text: str, extras: Optional[dict] = None) -> Tuple[bool, str]:
         """按配置渠道分发推送。"""
         if self._channel == "huawei":
-            return await self._push_huawei(title, text)
-        return await self._push_jpush(title, text, extras)
+            return self._push_huawei(title, text)
+        return self._push_jpush(title, text, extras)
 
-    async def _push_huawei(self, title: str, text: str) -> tuple[bool, str]:
+    def _push_huawei(self, title: str, text: str) -> Tuple[bool, str]:
         """华为 Push Kit v3 直连推送。"""
         if not self._token:
             return False, "未配置华为 Push Token"
@@ -959,9 +983,9 @@ class AppPushMsg(_PluginBase):
         if not isinstance(account, dict):
             return False, "未配置华为服务账号 JSON"
         try:
-            token, mode = await self._get_huawei_token()
+            token, mode = self._get_huawei_token()
         except Exception as exc:  # noqa: BLE001
-            logger.error("AppPushMsg 华为鉴权失败: {}".format(exc))
+            logger.error("MoviePilotAppPush 华为鉴权失败: {}".format(exc))
             return False, "华为鉴权失败: {}".format(exc)
         url = HUAWEI_PUSH_URL_TEMPLATE.format(project_id=project_id)
         payload = _build_huawei_payload(title, text, self._hw_category, self._token)
@@ -971,11 +995,9 @@ class AppPushMsg(_PluginBase):
             "push-type": "0",
         }
         try:
-            response = await AsyncRequestUtils().post(
-                url, json=payload, headers=headers, raise_exception=True
-            )
+            response = RequestUtils().post(url, json=payload, headers=headers)
         except Exception as exc:  # noqa: BLE001
-            logger.error("AppPushMsg 华为推送请求异常: {}".format(exc))
+            logger.error("MoviePilotAppPush 华为推送请求异常: {}".format(exc))
             return False, "推送请求异常: {}".format(exc)
         if response is None:
             return False, "推送网关无响应"
@@ -986,12 +1008,12 @@ class AppPushMsg(_PluginBase):
             body = {}
         ok, message = _parse_huawei_response(status, body)
         if ok:
-            logger.info("AppPushMsg 华为推送成功（{}）: {}".format(mode, message))
+            logger.info("MoviePilotAppPush 华为推送成功（{}）: {}".format(mode, message))
         else:
-            logger.error("AppPushMsg 华为推送失败: {}".format(message))
+            logger.error("MoviePilotAppPush 华为推送失败: {}".format(message))
         return ok, message
 
-    async def _get_huawei_token(self) -> tuple[str, str]:
+    def _get_huawei_token(self):
         """获取华为鉴权令牌：优先 JWT 换 access_token，失败回退官方 JWT 直连。"""
         account = self._hw_service_account
         if not isinstance(account, dict):
@@ -1009,7 +1031,7 @@ class AppPushMsg(_PluginBase):
         ):
             return self._hw_token, self._hw_token_mode
         assertion = _build_service_account_jwt(account)
-        exchanged = await self._exchange_huawei_access_token(account, assertion)
+        exchanged = self._exchange_huawei_access_token(account, assertion)
         if exchanged:
             mode = "access_token"
             value, expires_in = exchanged
@@ -1021,21 +1043,20 @@ class AppPushMsg(_PluginBase):
         self._hw_token_mode = mode
         self._hw_token_key = cache_key
         self._hw_token_expire_at = now + ttl
-        logger.info("AppPushMsg 华为鉴权令牌已刷新（{}）".format(mode))
+        logger.info("MoviePilotAppPush 华为鉴权令牌已刷新（{}）".format(mode))
         return value, mode
 
-    async def _exchange_huawei_access_token(self, account: dict, assertion: str):
+    def _exchange_huawei_access_token(self, account: dict, assertion: str):
         """用服务账号 JWT 换取 access_token；不可用时返回 None（回退 JWT 直连）。"""
         token_uri = _coerce_str(account.get("token_uri")) or HUAWEI_DEFAULT_TOKEN_URI
         try:
-            response = await AsyncRequestUtils().post(
+            response = RequestUtils().post(
                 token_uri,
                 data={"grant_type": HUAWEI_JWT_BEARER_GRANT, "assertion": assertion},
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
-                raise_exception=True,
             )
         except Exception as exc:  # noqa: BLE001
-            logger.debug("AppPushMsg 华为 access_token 换取失败，回退 JWT 直连: {}".format(exc))
+            logger.debug("MoviePilotAppPush 华为 access_token 换取失败，回退 JWT 直连: {}".format(exc))
             return None
         if response is None:
             return None
@@ -1050,17 +1071,17 @@ class AppPushMsg(_PluginBase):
             return None
         return access_token, body.get("expires_in") or 3300
 
-    async def _push_jpush(
-        self, title: str, text: str, extras: dict | None = None
-    ) -> tuple[bool, str]:
+    def _push_jpush(
+        self, title: str, text: str, extras: Optional[dict] = None
+    ) -> Tuple[bool, str]:
         if not self._appkey or not self._mastersecret:
-            logger.warning("AppPushMsg: 未配置 JPush AppKey / Master Secret")
+            logger.warning("MoviePilotAppPush: 未配置 JPush AppKey / Master Secret")
             return False, "未配置 JPush 服务端凭据"
 
         credentials = base64.b64encode(
-            f"{self._appkey}:{self._mastersecret}".encode("utf-8")
+            "{}:{}".format(self._appkey, self._mastersecret).encode("utf-8")
         ).decode("ascii")
-        headers = {"Authorization": f"Basic {credentials}"}
+        headers = {"Authorization": "Basic {}".format(credentials)}
         payload = {
             "platform": ["android", "ios", "hmos"],
             "audience": {"alias": [self._token]},
@@ -1070,18 +1091,14 @@ class AppPushMsg(_PluginBase):
         }
 
         try:
-            # app.sdk.network.AsyncRequestUtils.post(url, data=None, json=None, **kwargs)
-            # raise_exception=True 时网络异常向上抛（httpx2.RequestError 等），
-            # HTTP 4xx/5xx 不抛，通过 response.status_code 判定。
-            response = await AsyncRequestUtils().post(
-                self.JPUSH_PUSH_URL,
-                json=payload,
-                headers=headers,
-                raise_exception=True,
+            # RequestUtils.post(url, data=None, json=None, **kwargs) 返回
+            # requests.Response；网络异常默认被吞掉并返回 None。
+            response = RequestUtils().post(
+                self.JPUSH_PUSH_URL, json=payload, headers=headers
             )
         except Exception as exc:  # noqa: BLE001
-            logger.error(f"AppPushMsg 推送请求异常: {exc}")
-            return False, f"推送请求异常: {exc}"
+            logger.error("MoviePilotAppPush 推送请求异常: {}".format(exc))
+            return False, "推送请求异常: {}".format(exc)
 
         if response is None:
             return False, "推送网关无响应"
@@ -1096,11 +1113,11 @@ class AppPushMsg(_PluginBase):
 
         if status < 400:
             msg_id = body.get("msg_id") or ""
-            logger.info(f"AppPushMsg 推送成功 msg_id={msg_id}")
-            return True, f"推送成功，msg_id={msg_id}"
+            logger.info("MoviePilotAppPush 推送成功 msg_id={}".format(msg_id))
+            return True, "推送成功，msg_id={}".format(msg_id)
 
         error = body.get("error") if isinstance(body.get("error"), dict) else {}
         code = error.get("code") or status
         message = error.get("message") or "推送失败"
-        logger.error(f"AppPushMsg 推送失败: {code} {message}")
-        return False, f"推送失败（{code}）：{message}"
+        logger.error("MoviePilotAppPush 推送失败: {} {}".format(code, message))
+        return False, "推送失败（{}）：{}".format(code, message)
