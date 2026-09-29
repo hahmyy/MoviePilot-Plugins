@@ -376,7 +376,7 @@ class MoviePilotAppPush(_PluginBase):
     plugin_name = "App 推送"
     plugin_desc = "将 MoviePilot 通知推送到鸿蒙/Android/iOS 客户端（系统级推送）。"
     plugin_icon = "MoviePilotAppPush.png"
-    plugin_version = "1.0.11"
+    plugin_version = "1.0.12"
     plugin_author = "hahmyy"
     author_url = "https://github.com/hahmyy"
     plugin_config_prefix = "moviepilotapppush_"
@@ -635,8 +635,14 @@ class MoviePilotAppPush(_PluginBase):
                 },
             },
             {
-                "component": "VSwitch",
-                "props": {"model": "onlyonce", "label": "发送测试（保存后立即发送一条）"},
+                "component": "VAlert",
+                "props": {
+                    "type": "info",
+                    "variant": "tonal",
+                    "density": "compact",
+                    "class": "mt-2",
+                    "text": "测试已移到插件详情页：点击「发送测试推送」按钮即可测试，不需要保存后再测。",
+                },
             },
         ]
         return [{"component": "VForm", "content": head + jpush_fields + huawei_fields + tail}], {
@@ -657,8 +663,131 @@ class MoviePilotAppPush(_PluginBase):
         }
 
     def get_page(self) -> list[dict]:
-        """插件详情页：展示最近一次测试结果与运行统计。"""
-        return self._build_last_test_card() + self._build_dashboard_elements()
+        """插件详情页：一键测试、成功率/失败率环形仪表与最近消息。"""
+        return (
+            self._build_last_test_card()
+            + [self._build_test_action_card()]
+            + self._build_dashboard_elements()
+        )
+
+    def _build_test_action_card(self) -> dict:
+        """详情页一键测试卡片：直接调用固定 /run 接口，无需先保存。"""
+        if not self._apikey:
+            return {
+                "component": "VAlert",
+                "props": {
+                    "type": "warning",
+                    "variant": "tonal",
+                    "class": "mt-2",
+                    "text": "请先在配置页保存 Push Key 与推送凭据，再回到本页点击测试。",
+                },
+            }
+        ready, ready_message = self._channel_ready()
+        if not ready:
+            return {
+                "component": "VAlert",
+                "props": {
+                    "type": "warning",
+                    "variant": "tonal",
+                    "class": "mt-2",
+                    "text": "暂不可测试：{}".format(ready_message),
+                },
+            }
+        return {
+            "component": "VCard",
+            "props": {"variant": "tonal", "class": "mt-2"},
+            "content": [
+                {
+                    "component": "VCardTitle",
+                    "props": {"class": "text-subtitle-1 font-weight-bold pb-1"},
+                    "text": "一键测试（无需保存）",
+                },
+                {
+                    "component": "VCardText",
+                    "props": {"class": "py-2"},
+                    "content": [
+                        {
+                            "component": "div",
+                            "props": {"class": "text-body-2 mb-3"},
+                            "text": "点击按钮立即调用 /api/v1/plugin/MoviePilotAppPush/run，使用配置页已保存的测试标题与内容，完成后本页统计会自动刷新。",
+                        },
+                        {
+                            "component": "VBtn",
+                            "props": {
+                                "color": "primary",
+                                "variant": "tonal",
+                                "prepend-icon": "mdi-send",
+                                "block": True,
+                            },
+                            "text": "发送测试推送",
+                            "events": {
+                                "click": {
+                                    "api": "/plugin/MoviePilotAppPush/run",
+                                    "method": "GET",
+                                    "params": {
+                                        "apikey": self._apikey,
+                                        "title": self._test_title or self.TEST_TITLE,
+                                        "text": self._test_text or self.TEST_TEXT,
+                                    },
+                                }
+                            },
+                        },
+                    ],
+                },
+            ],
+        }
+
+    @staticmethod
+    def _rate_values(stats: dict) -> tuple:
+        """计算成功率、失败率（百分比）与总尝试次数。"""
+        success = int(stats.get("push_success") or 0)
+        failure = int(stats.get("push_failure") or 0)
+        attempts = success + failure
+        if attempts <= 0:
+            return 0.0, 0.0, 0
+        return success * 100.0 / attempts, failure * 100.0 / attempts, attempts
+
+    @staticmethod
+    def _rate_ring(title: str, rate: float, color: str, subtitle: str) -> dict:
+        """构建环形仪表盘卡片（VProgressCircular）。"""
+        return {
+            "component": "VCol",
+            "props": {"cols": 12, "sm": 6},
+            "content": [
+                {
+                    "component": "VCard",
+                    "props": {"variant": "tonal", "class": "h-100"},
+                    "content": [
+                        {
+                            "component": "VCardText",
+                            "props": {"class": "d-flex flex-column align-center justify-center py-4"},
+                            "content": [
+                                {
+                                    "component": "VProgressCircular",
+                                    "props": {
+                                        "model-value": round(max(0.0, min(100.0, rate)), 1),
+                                        "size": 120,
+                                        "width": 12,
+                                        "color": color,
+                                    },
+                                    "text": "{:.0f}%".format(rate),
+                                },
+                                {
+                                    "component": "div",
+                                    "props": {"class": "text-subtitle-2 mt-3"},
+                                    "text": title,
+                                },
+                                {
+                                    "component": "div",
+                                    "props": {"class": "text-caption text-medium-emphasis"},
+                                    "text": subtitle,
+                                },
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
 
     def _build_last_test_card(self) -> list[dict]:
         """构建最近一次测试结果卡片。"""
@@ -719,8 +848,29 @@ class MoviePilotAppPush(_PluginBase):
         history = self._read_data("push_history")
         if not isinstance(history, list):
             history = []
+        success_rate, failure_rate, attempts = self._rate_values(stats)
         return [
             self._dashboard_status_alert(stats),
+            {
+                "component": "VRow",
+                "props": {"class": "mt-1"},
+                "content": [
+                    self._rate_ring(
+                        "成功率",
+                        success_rate,
+                        "success",
+                        "成功 {} / 共 {} 次".format(stats.get("push_success", 0), attempts)
+                        if attempts else "暂无推送记录",
+                    ),
+                    self._rate_ring(
+                        "失败率",
+                        failure_rate,
+                        "error",
+                        "失败 {} / 共 {} 次".format(stats.get("push_failure", 0), attempts)
+                        if attempts else "暂无推送记录",
+                    ),
+                ],
+            },
             {
                 "component": "VRow",
                 "content": [

@@ -37,9 +37,9 @@ def test_manifest_and_plugin_are_v3_aligned() -> None:
         if isinstance(node, ast.ImportFrom)
     }
 
-    assert manifest["version"] == "1.0.11"
+    assert manifest["version"] == "1.0.12"
     assert manifest["system_version"] == ">=3.0.0"
-    assert 'plugin_version = "1.0.11"' in source
+    assert 'plugin_version = "1.0.12"' in source
     assert manifest["icon"] == "MoviePilotAppPush.png"
     assert (ROOT / "icons" / manifest["icon"]).is_file()
     assert not any(
@@ -298,7 +298,7 @@ def test_custom_test_content_and_onlyonce_trigger() -> None:
     form_text = json.dumps(form, ensure_ascii=False)
     assert '"model": "testtitle"' in form_text
     assert '"model": "testtext"' in form_text
-    assert '"model": "onlyonce"' in form_text
+    assert "插件详情页" in form_text
     assert defaults["onlyonce"] is False
 
     calls = []
@@ -719,3 +719,59 @@ def test_test_push_carries_detail_extras() -> None:
     assert captured["extras"]["title"] == "自定义标题"
     assert captured["extras"]["text"] == "自定义内容"
     assert isinstance(captured["extras"]["ts"], int)
+
+
+def _flatten_page(node):
+    """递归展开页面 JSON，便于查找组件。"""
+    if isinstance(node, dict):
+        yield node
+        for value in node.values():
+            yield from _flatten_page(value)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _flatten_page(item)
+
+
+def test_page_has_one_click_test_button_and_rate_rings() -> None:
+    """详情页有一键测试按钮（调用固定 /run）与成功率/失败率环形仪表。"""
+    module = _load_plugin()
+    plugin = _new_instance(
+        module,
+        {
+            "enabled": True,
+            "apikey": "k",
+            "channel": "jpush",
+            "token": "t",
+            "appkey": "ak",
+            "mastersecret": "ms",
+        },
+    )
+    store = {
+        "push_stats": {"push_success": 3, "push_failure": 1},
+        "push_history": [],
+        "last_test_result": {},
+    }
+    plugin._read_data = lambda key: store.get(key)
+    nodes = list(_flatten_page(plugin.get_page()))
+
+    rings = [n for n in nodes if n.get("component") == "VProgressCircular"]
+    assert sorted(round(n["props"]["model-value"]) for n in rings) == [25, 75]
+
+    buttons = [n for n in nodes if n.get("component") == "VBtn" and n.get("events")]
+    assert buttons, "缺少一键测试按钮"
+    click = buttons[0]["events"]["click"]
+    assert click["api"] == "/plugin/MoviePilotAppPush/run"
+    assert click["method"] == "GET"
+    assert click["params"]["apikey"] == "k"
+    assert "title" in click["params"] and "text" in click["params"]
+
+
+def test_page_test_button_hidden_when_not_ready() -> None:
+    """未配置 Push Key 时不展示测试按钮，而是给出提示。"""
+    module = _load_plugin()
+    plugin = _new_instance(module, {"enabled": True, "channel": "jpush"})
+    store = {"push_stats": {}, "push_history": [], "last_test_result": {}}
+    plugin._read_data = lambda key: store.get(key)
+    nodes = list(_flatten_page(plugin.get_page()))
+    assert not [n for n in nodes if n.get("component") == "VBtn" and n.get("events")]
+    assert any("请先在配置页保存" in json.dumps(n, ensure_ascii=False) for n in nodes)

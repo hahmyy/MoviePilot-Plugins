@@ -46,7 +46,7 @@
 - 支持消息类型多选筛选（媒体服务器/订阅/整理入库/资源下载/站点/手动处理/其它/智能体/插件），不选则转发全部。
 - 配置页可自定义测试标题与内容，并用“发送测试（保存后立即发送一条）”开关立即发送；测试接口支持 title/text 查询参数覆盖。
 - 图标：仓库根 `icons/MoviePilotAppPush.png`（V2/V3 共用），索引 `icon` 字段一致。
-- 版本：`package.json` / `package.v2.json` 内 `MoviePilotAppPush` 版本 0.1.11，与插件类 `plugin_version` 一致。
+- 版本：`package.json` / `package.v2.json` 内 `MoviePilotAppPush` 版本 0.1.12，与插件类 `plugin_version` 一致。
 
 ## 华为 Push Kit 直连渠道（可选）
 
@@ -85,3 +85,12 @@
 
 极光放在 notification.extras 与各平台 notification.<平台>.extras；华为放在
 payload.notification.clickAction.data。App 按以上字段解析为通知详情。
+
+## 插件详情页（测试与统计）
+
+- 详情页顶部提供“发送测试推送”按钮：点击后直接调用固定接口
+  `/api/v1/plugin/MoviePilotAppPush/run`（前端相对路径 `/plugin/MoviePilotAppPush/run`），
+  使用配置页已保存的测试标题/内容，无需先保存再测试；完成后页面会自动刷新统计。
+- 详情页与首页仪表盘都包含成功率/失败率环形仪表（VProgressCircular），
+  以成功次数与失败次数计算百分比；没有推送记录时显示 0% 与“暂无推送记录”。
+- 测试开关不再放在配置表单里（`onlyonce` 字段保留兼容，默认关闭）。
