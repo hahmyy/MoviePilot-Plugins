@@ -36,3 +36,13 @@ MoviePilot 宿主代码和测试为准；V2 兼容实现以 V2 宿主 SDK 与官
   不允许所有渠道字段同时堆在同一版面。
 - 文件上传字段使用 `VFileInput` 搭配 `onUpdate:modelValue` 表达式，把文件内容读入文本字段；
   表单 model 中不得保存 File 对象，避免配置序列化失败；App 端不支持文件上传时至少提供粘贴输入。
+
+## 固定契约（不可随意变更）
+
+- 插件 ID 固定为 `MoviePilotAppPush`，目录保持 `moviepilotapppush`，V2/V3 双布局。
+- 测试接口固定为 `GET /api/v1/plugin/MoviePilotAppPush/run`；参数 `apikey` 必填，`title`/`text`
+  可选；响应固定为 `{code, msg}`，成功时 `code` 为 0。
+- 配置字段固定为 `enabled`、`channel`、`apikey`、`token`、`appkey`、`mastersecret`、`appid`、
+  `project_id`、`service_account_json`、`huawei_category`、`msgtypes`、`testtitle`、`testtext`、`onlyonce`。
+- 任何影响以上 ID、接口路径/参数/响应或配置字段的变更，必须先同步通知 App 侧（mp-v2），
+  并在本文件与插件 README 中同步更新契约说明。

@@ -37,9 +37,9 @@ def test_manifest_and_plugin_are_v3_aligned() -> None:
         if isinstance(node, ast.ImportFrom)
     }
 
-    assert manifest["version"] == "1.0.9"
+    assert manifest["version"] == "1.0.10"
     assert manifest["system_version"] == ">=3.0.0"
-    assert 'plugin_version = "1.0.9"' in source
+    assert 'plugin_version = "1.0.10"' in source
     assert manifest["icon"] == "MoviePilotAppPush.png"
     assert (ROOT / "icons" / manifest["icon"]).is_file()
     assert not any(
@@ -543,5 +543,95 @@ def test_form_shows_channel_fields_with_v_show_and_json_upload() -> None:
     file_props = file_inputs[0]["props"]
     assert file_props["v-show"] == "channel === 'huawei'"
     handler = file_props["onUpdate:modelValue"]
-    assert "service_account_json" in handler and "service_account_file" in handler
-    assert defaults["channel"] == "jpush" and defaults["service_account_file"] == ""
+    assert "service_account_json" in handler
+    assert defaults["channel"] == "jpush" and defaults["service_account_json"] == ""
+    assert "service_account_file" not in defaults
+
+
+def test_huawei_error_codes_are_readable() -> None:
+    """华为业务错误码能给出中文原因与处理建议。"""
+    module = _load_plugin()
+    ok, msg = module._parse_huawei_response(
+        401, {"code": "80200001", "msg": "Authentication failed", "requestId": "R1"}
+    )
+    assert not ok and "80200001" in msg and "服务账号" in msg
+
+    ok, msg = module._parse_huawei_response(
+        200, {"code": "80300007", "msg": "All tokens are invalid", "requestId": "R2"}
+    )
+    assert not ok and "Push Token" in msg
+
+    partial = json.dumps(
+        {"illegalTokens": {"tokenFormatError": ["x"]}, "success": 0, "failure": 1}
+    )
+    ok, msg = module._parse_huawei_response(
+        200, {"code": "80100000", "msg": partial, "requestId": "R3"}
+    )
+    assert not ok and "部分" in msg and "tokenFormatError" in msg
+
+    ok, msg = module._parse_huawei_response(
+        503, {"code": "81000001", "msg": "Internal error", "requestId": "R4"}
+    )
+    assert not ok and "稍后重试" in msg
+
+
+def test_huawei_end_to_end_against_mock_gateway(monkeypatch) -> None:
+    """本地模拟华为网关，验证 JWT 换 token、v3 请求与响应解析全链路。"""
+    import http.server as _http
+    import threading
+
+    module = _load_plugin()
+    captured = {}
+
+    class Handler(_http.BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            return
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(length).decode("utf-8") if length else ""
+            captured[self.path] = {"headers": dict(self.headers), "body": raw}
+            if self.path.startswith("/oauth2"):
+                payload = {"access_token": "AT-mock", "expires_in": 3600}
+            else:
+                payload = {"code": "80000000", "msg": "Success", "requestId": "RID-mock"}
+            data = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    server = _http.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        base = "http://127.0.0.1:{}".format(server.server_address[1])
+        account = dict(_service_account())
+        account["token_uri"] = base + "/oauth2/v3/token"
+        plugin = _new_instance(
+            module,
+            {
+                "enabled": True,
+                "channel": "huawei",
+                "token": "HW-TOKEN",
+                "project_id": "proj-test",
+            },
+        )
+        plugin._hw_service_account = account
+        monkeypatch.setattr(
+            module, "HUAWEI_PUSH_URL_TEMPLATE", base + "/v3/{project_id}/messages:send"
+        )
+        ok, message = asyncio.run(plugin._push_huawei("标题", "正文"))
+        assert ok and "RID-mock" in message
+
+        exchange = captured["/oauth2/v3/token"]
+        assert "grant_type=urn" in exchange["body"] and "assertion=" in exchange["body"]
+        push = captured["/v3/proj-test/messages:send"]
+        assert push["headers"].get("push-type") == "0"
+        assert push["headers"].get("Authorization") == "Bearer AT-mock"
+        payload = json.loads(push["body"])
+        assert payload["target"]["token"] == ["HW-TOKEN"]
+        assert payload["payload"]["notification"]["title"] == "标题"
+    finally:
+        server.shutdown()
+        server.server_close()

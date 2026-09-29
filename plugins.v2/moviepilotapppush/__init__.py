@@ -138,6 +138,60 @@ HUAWEI_PUSH_URL_TEMPLATE = "https://push-api.cloud.huawei.com/v3/{project_id}/me
 HUAWEI_DEFAULT_TOKEN_URI = "https://oauth-login.cloud.huawei.com/oauth2/v3/token"
 HUAWEI_JWT_BEARER_GRANT = "urn:ietf:params:oauth:grant-type:jwt-bearer"
 HUAWEI_SUCCESS_CODE = "80000000"
+
+
+# 华为 Push Kit 业务错误码与 HTTP 状态码的可读化说明（依据官方响应参数文档整理）
+HUAWEI_ERROR_HINTS = {
+    "80100000": "部分 Token 发送成功（单设备推送一般视为失败）：请检查 Push Token 是否属于当前 projectId、是否申请了 push-type 场景权益、Token 是否有效。",
+    "80100001": "请求参数部分错误：请检查 projectId、target.token 与请求体字段。",
+    "80100003": "消息结构体错误：请检查 payload.notification 的 category/title/body 等字段。",
+    "80100004": "消息过期时间非法：请检查 pushOptions.ttl。",
+    "80100022": "消息携带图片未通过风控验签：请检查图片地址与图片风控配置。",
+    "80200001": "认证错误：请检查服务账号 JSON（key_id/sub_account/private_key）与 Authorization 是否正确。",
+    "80200005": "JWT Token 过期：插件会自动刷新后重试；若持续出现请检查服务器时间。",
+    "80300002": "当前应用无权限下发推送消息：请在 AGC 开通 Push Kit 以及对应的场景权益。",
+    "80300007": "所有 Push Token 都无效：请在 App 重新获取 Push Token，并确认应用属于当前 projectId 的项目。",
+    "80300008": "消息体超过 4096 Bytes：请缩短通知标题或正文。",
+    "80300010": "Token 数量超过系统默认上限。",
+    "80300029": "测试消息流量受限：请降低测试频率后重试。",
+    "80300030": "测试消息单次携带的 Token 数量超过上限。",
+    "80300036": "JWT 有效期超过 1 天：插件按 1 小时生成，若出现请检查服务账号配置。",
+    "80300037": "应用存在违规处罚，暂时无法发送推送消息。",
+    "81000001": "华为推送服务内部错误：请稍后重试。",
+}
+
+HUAWEI_HTTP_HINTS = {
+    400: "请求参数错误，请结合业务错误码排查",
+    401: "鉴权失败，请检查 Authorization 与服务账号配置",
+    403: "没有访问权限，请检查 AGC 项目与应用配置",
+    404: "接口地址或 projectId 不存在，请检查 project_id 配置",
+    429: "请求被限流，请降低发送频率后重试",
+    500: "华为推送服务内部错误，请稍后重试",
+    502: "网关连接异常，请稍后重试",
+    503: "服务限流，请降低发送频率后重试",
+}
+
+
+def _huawei_error_detail(code: str, status: int, message: str) -> str:
+    """把华为业务错误码转换为可读的中文说明。"""
+    detail = _truncate(message or "推送失败", 160)
+    if code == "80100000":
+        try:
+            payload = json.loads(message or "{}")
+        except Exception:  # noqa: BLE001
+            payload = {}
+        if isinstance(payload, dict):
+            success = payload.get("success", "-")
+            failure = payload.get("failure", "-")
+            illegal = payload.get("illegalTokens")
+            reasons = ",".join(sorted(illegal.keys())) if isinstance(illegal, dict) else ""
+            detail = "部分 Token 发送成功（成功 {} / 失败 {}{}）".format(
+                success, failure, "；原因：" + reasons if reasons else ""
+            )
+    hint = HUAWEI_ERROR_HINTS.get(code) or HUAWEI_HTTP_HINTS.get(int(status or 0)) or ""
+    if hint:
+        return "{}；建议：{}".format(detail, hint)
+    return detail
 HUAWEI_CATEGORIES = [
     "IM",
     "VOIP",
@@ -224,8 +278,8 @@ def _build_service_account_jwt(account: dict, now: int = None) -> str:
 _SERVICE_ACCOUNT_UPLOAD_HANDLER = (
     "(files) => { const f = Array.isArray(files) ? files[0] : files; "
     "if (!f) { return; } const reader = new FileReader(); "
-    "reader.onload = function () { service_account_json = String(reader.result || ''); "
-    "service_account_file = f.name; }; reader.readAsText(f, 'utf-8'); }"
+    "reader.onload = function () { service_account_json = String(reader.result || ''); }; "
+    "reader.readAsText(f, 'utf-8'); }"
 )
 
 
@@ -261,7 +315,11 @@ def _parse_huawei_response(status: int, body: Any) -> tuple:
     request_id = _coerce_str(body.get("requestId"))
     if int(status or 0) < 400 and code == HUAWEI_SUCCESS_CODE:
         return True, "推送成功，requestId={}".format(request_id or "-")
-    return False, "推送失败（{}）：{}".format(code or "-", message)
+    detail = _huawei_error_detail(code, status, message)
+    text = "推送失败（{}）：{}".format(code or status or "-", detail)
+    if request_id:
+        text += "（requestId={}）".format(request_id)
+    return False, text
 
 
 def _compose_notification(title: str, text: str, extras: dict) -> dict:
@@ -305,7 +363,7 @@ class MoviePilotAppPush(_PluginBase):
     # 插件图标
     plugin_icon = "MoviePilotAppPush.png"
     # 插件版本
-    plugin_version = "0.1.9"
+    plugin_version = "0.1.10"
     # 插件作者
     plugin_author = "hahmyy"
     # 作者主页
@@ -421,7 +479,6 @@ class MoviePilotAppPush(_PluginBase):
             "appid": self._appid,
             "project_id": self._project_id,
             "service_account_json": "",
-            "service_account_file": "",
             "huawei_category": self._hw_category,
         }
 
@@ -573,7 +630,6 @@ class MoviePilotAppPush(_PluginBase):
             "appid": "",
             "project_id": "",
             "service_account_json": "",
-            "service_account_file": "",
             "huawei_category": "MARKETING",
             "msgtypes": [],
             "testtitle": "",
