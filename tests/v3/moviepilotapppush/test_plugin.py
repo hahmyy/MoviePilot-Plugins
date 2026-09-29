@@ -37,9 +37,9 @@ def test_manifest_and_plugin_are_v3_aligned() -> None:
         if isinstance(node, ast.ImportFrom)
     }
 
-    assert manifest["version"] == "1.0.13"
+    assert manifest["version"] == "1.0.14"
     assert manifest["system_version"] == ">=3.0.0"
-    assert 'plugin_version = "1.0.13"' in source
+    assert 'plugin_version = "1.0.14"' in source
     assert manifest["icon"] == "MoviePilotAppPush.png"
     assert (ROOT / "icons" / manifest["icon"]).is_file()
     assert not any(
@@ -78,6 +78,21 @@ def test_run_contract_validates_apikey_and_credentials_without_network() -> None
     plugin._enabled = False
     disabled = asyncio.run(plugin.run(apikey="test-key"))
     assert disabled["code"] != 0
+
+
+def test_run_unexpected_error_still_returns_code_msg(monkeypatch) -> None:
+    """测试链路意外异常也必须收敛为 code/msg，不能返回宿主 500。"""
+    module = _load_plugin()
+    plugin = _new_instance(module, {})
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("private_key should not leak")
+
+    monkeypatch.setattr(plugin, "_execute_test", boom)
+    result = asyncio.run(plugin.run(apikey="test-key"))
+    assert set(result) == {"code", "msg"}
+    assert result["code"] != 0
+    assert "private_key" not in result["msg"]
 
 
 def test_notice_message_forwards_title_text_and_extras(monkeypatch) -> None:

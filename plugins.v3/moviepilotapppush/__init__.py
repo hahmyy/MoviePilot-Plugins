@@ -385,7 +385,7 @@ class MoviePilotAppPush(_PluginBase):
     plugin_name = "App 推送"
     plugin_desc = "将 MoviePilot 通知推送到鸿蒙/Android/iOS 客户端（系统级推送）。"
     plugin_icon = "MoviePilotAppPush.png"
-    plugin_version = "1.0.13"
+    plugin_version = "1.0.14"
     plugin_author = "hahmyy"
     author_url = "https://github.com/hahmyy"
     plugin_config_prefix = "moviepilotapppush_"
@@ -1077,10 +1077,17 @@ class MoviePilotAppPush(_PluginBase):
         self, apikey: str | None = None, title: str | None = None, text: str | None = None
     ) -> dict[str, Any]:
         """测试接口：校验 apikey 后发送测试通知，并记录最近一次结果。"""
-        send_title = _coerce_str(title) or self._test_title or self.TEST_TITLE
-        send_text = _coerce_str(text) or self._test_text or self.TEST_TEXT
-        result, attempted = await self._execute_test(apikey, title, text)
-        await self._record_event("测试", send_title, send_text, result, attempted)
+        try:
+            send_title = _coerce_str(title) or self._test_title or self.TEST_TITLE
+            send_text = _coerce_str(text) or self._test_text or self.TEST_TEXT
+            result, attempted = await self._execute_test(apikey, title, text)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"MoviePilotAppPush 测试接口执行异常: {type(exc).__name__}")
+            return {"code": 1, "msg": "测试执行异常，请查看 MoviePilot 日志"}
+        try:
+            await self._record_event("测试", send_title, send_text, result, attempted)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"MoviePilotAppPush 测试结果记录异常: {type(exc).__name__}")
         return result
 
     def _channel_ready(self) -> tuple[bool, str]:
