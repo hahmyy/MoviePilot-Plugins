@@ -17,10 +17,19 @@ except Exception:  # pragma: no cover - 运行期由 _build_service_account_jwt 
     padding = None
 
 from app.plugins import _PluginBase
+from app.sdk.config import settings
 from app.schemas.types import EventType, NotificationType
 from app.sdk.events import Event, eventmanager
 from app.sdk.logging import logger
 from app.sdk.network import AsyncRequestUtils
+
+
+PUSH_HTTP_TIMEOUT = 15
+
+
+def _push_http_options() -> dict:
+    """把宿主代理与超时统一传给推送 HTTP 客户端，避免网络不可达时长时间挂起。"""
+    return {"timeout": PUSH_HTTP_TIMEOUT, "proxies": getattr(settings, "PROXY", None)}
 
 
 def _coerce_str(value: Any) -> str:
@@ -376,7 +385,7 @@ class MoviePilotAppPush(_PluginBase):
     plugin_name = "App 推送"
     plugin_desc = "将 MoviePilot 通知推送到鸿蒙/Android/iOS 客户端（系统级推送）。"
     plugin_icon = "MoviePilotAppPush.png"
-    plugin_version = "1.0.12"
+    plugin_version = "1.0.13"
     plugin_author = "hahmyy"
     author_url = "https://github.com/hahmyy"
     plugin_config_prefix = "moviepilotapppush_"
@@ -1258,14 +1267,14 @@ class MoviePilotAppPush(_PluginBase):
             "push-type": "0",
         }
         try:
-            response = await AsyncRequestUtils().post(
+            response = await AsyncRequestUtils(**_push_http_options()).post(
                 url, json=payload, headers=headers, raise_exception=True
             )
         except Exception as exc:  # noqa: BLE001
             logger.error("MoviePilotAppPush 华为推送请求异常: {}".format(exc))
             return False, "推送请求异常: {}".format(exc)
         if response is None:
-            return False, "推送网关无响应"
+            return False, "推送网关无响应（网络不可达或超时，请检查服务器网络/代理配置）"
         status = int(getattr(response, "status_code", 0) or 0)
         try:
             body = response.json()
@@ -1315,7 +1324,7 @@ class MoviePilotAppPush(_PluginBase):
         """用服务账号 JWT 换取 access_token；不可用时返回 None（回退 JWT 直连）。"""
         token_uri = _coerce_str(account.get("token_uri")) or HUAWEI_DEFAULT_TOKEN_URI
         try:
-            response = await AsyncRequestUtils().post(
+            response = await AsyncRequestUtils(**_push_http_options()).post(
                 token_uri,
                 data={"grant_type": HUAWEI_JWT_BEARER_GRANT, "assertion": assertion},
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
@@ -1360,7 +1369,7 @@ class MoviePilotAppPush(_PluginBase):
             # app.sdk.network.AsyncRequestUtils.post(url, data=None, json=None, **kwargs)
             # raise_exception=True 时网络异常向上抛（httpx2.RequestError 等），
             # HTTP 4xx/5xx 不抛，通过 response.status_code 判定。
-            response = await AsyncRequestUtils().post(
+            response = await AsyncRequestUtils(**_push_http_options()).post(
                 self.JPUSH_PUSH_URL,
                 json=payload,
                 headers=headers,
@@ -1371,7 +1380,7 @@ class MoviePilotAppPush(_PluginBase):
             return False, f"推送请求异常: {exc}"
 
         if response is None:
-            return False, "推送网关无响应"
+            return False, "推送网关无响应（网络不可达或超时，请检查服务器网络/代理配置）"
 
         status = int(getattr(response, "status_code", 0) or 0)
         try:

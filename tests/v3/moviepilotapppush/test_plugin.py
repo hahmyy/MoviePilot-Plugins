@@ -37,9 +37,9 @@ def test_manifest_and_plugin_are_v3_aligned() -> None:
         if isinstance(node, ast.ImportFrom)
     }
 
-    assert manifest["version"] == "1.0.12"
+    assert manifest["version"] == "1.0.13"
     assert manifest["system_version"] == ">=3.0.0"
-    assert 'plugin_version = "1.0.12"' in source
+    assert 'plugin_version = "1.0.13"' in source
     assert manifest["icon"] == "MoviePilotAppPush.png"
     assert (ROOT / "icons" / manifest["icon"]).is_file()
     assert not any(
@@ -436,6 +436,11 @@ def test_huawei_channel_uses_access_token_and_v3_request(monkeypatch) -> None:
     calls = []
 
     class FakeAsyncRequestUtils:
+        init_calls = []
+
+        def __init__(self, **kwargs):
+            type(self).init_calls.append(kwargs)
+
         async def post(self, url, **kwargs):
             calls.append((url, kwargs))
             if "oauth2" in url:
@@ -444,6 +449,9 @@ def test_huawei_channel_uses_access_token_and_v3_request(monkeypatch) -> None:
 
     monkeypatch.setattr(module, "AsyncRequestUtils", FakeAsyncRequestUtils)
     ok, message = asyncio.run(plugin._push_huawei("标题", "正文"))
+    assert FakeAsyncRequestUtils.init_calls
+    assert FakeAsyncRequestUtils.init_calls[0].get("timeout") == module.PUSH_HTTP_TIMEOUT
+    assert "proxies" in FakeAsyncRequestUtils.init_calls[0]
     assert ok and "R1" in message
     assert len(calls) == 2
     exchange = calls[0][1]["data"]
@@ -468,6 +476,11 @@ def test_huawei_channel_falls_back_to_jwt(monkeypatch) -> None:
     calls = []
 
     class FakeAsyncRequestUtils:
+        init_calls = []
+
+        def __init__(self, **kwargs):
+            type(self).init_calls.append(kwargs)
+
         async def post(self, url, **kwargs):
             calls.append((url, kwargs))
             if "oauth2" in url:

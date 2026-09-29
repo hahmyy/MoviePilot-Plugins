@@ -39,8 +39,8 @@ def test_manifest_and_plugin_are_v2_aligned() -> None:
         if isinstance(node, ast.ImportFrom)
     }
 
-    assert manifest["version"] == "0.1.12"
-    assert 'plugin_version = "0.1.12"' in source
+    assert manifest["version"] == "0.1.13"
+    assert 'plugin_version = "0.1.13"' in source
     assert manifest["icon"] == "MoviePilotAppPush.png"
     assert (ROOT / "icons" / manifest["icon"]).is_file()
     assert "app.core.event" in imports
@@ -149,7 +149,7 @@ def test_v2_layouts_stay_identical() -> None:
 
     package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))["MoviePilotAppPush"]
     versioned_package = json.loads((ROOT / "package.v2.json").read_text(encoding="utf-8"))["MoviePilotAppPush"]
-    assert package["version"] == versioned_package["version"] == "0.1.12"
+    assert package["version"] == versioned_package["version"] == "0.1.13"
     assert package["icon"] == versioned_package["icon"] == "MoviePilotAppPush.png"
 
 
@@ -423,6 +423,11 @@ def test_huawei_channel_uses_access_token_and_v3_request(monkeypatch) -> None:
     calls = []
 
     class FakeRequestUtils:
+        init_calls = []
+
+        def __init__(self, **kwargs):
+            type(self).init_calls.append(kwargs)
+
         def post(self, url, **kwargs):
             calls.append((url, kwargs))
             if "oauth2" in url:
@@ -431,6 +436,9 @@ def test_huawei_channel_uses_access_token_and_v3_request(monkeypatch) -> None:
 
     monkeypatch.setattr(module, "RequestUtils", FakeRequestUtils)
     ok, message = plugin._push_huawei("标题", "正文")
+    assert FakeRequestUtils.init_calls
+    assert FakeRequestUtils.init_calls[0].get("timeout") == module.PUSH_HTTP_TIMEOUT
+    assert "proxies" in FakeRequestUtils.init_calls[0]
     assert ok and "R1" in message
     assert len(calls) == 2
     exchange = calls[0][1]["data"]
@@ -455,6 +463,11 @@ def test_huawei_channel_falls_back_to_jwt(monkeypatch) -> None:
     calls = []
 
     class FakeRequestUtils:
+        init_calls = []
+
+        def __init__(self, **kwargs):
+            type(self).init_calls.append(kwargs)
+
         def post(self, url, **kwargs):
             calls.append((url, kwargs))
             if "oauth2" in url:

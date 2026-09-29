@@ -23,11 +23,20 @@ except Exception:  # pragma: no cover - 运行期由 _build_service_account_jwt 
     serialization = None
     padding = None
 
+from app.core.config import settings
 from app.core.event import Event, eventmanager
 from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas.types import EventType, NotificationType
 from app.utils.http import RequestUtils
+
+
+PUSH_HTTP_TIMEOUT = 15
+
+
+def _push_http_options() -> dict:
+    """把宿主代理与超时统一传给推送 HTTP 客户端，避免网络不可达时长时间挂起。"""
+    return {"timeout": PUSH_HTTP_TIMEOUT, "proxies": getattr(settings, "PROXY", None)}
 
 
 def _coerce_str(value: Any) -> str:
@@ -387,7 +396,7 @@ class MoviePilotAppPush(_PluginBase):
     # 插件图标
     plugin_icon = "MoviePilotAppPush.png"
     # 插件版本
-    plugin_version = "0.1.12"
+    plugin_version = "0.1.13"
     # 插件作者
     plugin_author = "hahmyy"
     # 作者主页
@@ -1254,12 +1263,14 @@ class MoviePilotAppPush(_PluginBase):
             "push-type": "0",
         }
         try:
-            response = RequestUtils().post(url, json=payload, headers=headers)
+            response = RequestUtils(**_push_http_options()).post(
+                url, json=payload, headers=headers, raise_exception=True
+            )
         except Exception as exc:  # noqa: BLE001
             logger.error("MoviePilotAppPush 华为推送请求异常: {}".format(exc))
             return False, "推送请求异常: {}".format(exc)
         if response is None:
-            return False, "推送网关无响应"
+            return False, "推送网关无响应（网络不可达或超时，请检查服务器网络/代理配置）"
         status = int(getattr(response, "status_code", 0) or 0)
         try:
             body = response.json()
@@ -1309,10 +1320,11 @@ class MoviePilotAppPush(_PluginBase):
         """用服务账号 JWT 换取 access_token；不可用时返回 None（回退 JWT 直连）。"""
         token_uri = _coerce_str(account.get("token_uri")) or HUAWEI_DEFAULT_TOKEN_URI
         try:
-            response = RequestUtils().post(
+            response = RequestUtils(**_push_http_options()).post(
                 token_uri,
                 data={"grant_type": HUAWEI_JWT_BEARER_GRANT, "assertion": assertion},
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
+                raise_exception=True,
             )
         except Exception as exc:  # noqa: BLE001
             logger.debug("MoviePilotAppPush 华为 access_token 换取失败，回退 JWT 直连: {}".format(exc))
@@ -1352,15 +1364,18 @@ class MoviePilotAppPush(_PluginBase):
         try:
             # RequestUtils.post(url, data=None, json=None, **kwargs) 返回
             # requests.Response；网络异常默认被吞掉并返回 None。
-            response = RequestUtils().post(
-                self.JPUSH_PUSH_URL, json=payload, headers=headers
+            response = RequestUtils(**_push_http_options()).post(
+                self.JPUSH_PUSH_URL,
+                json=payload,
+                headers=headers,
+                raise_exception=True,
             )
         except Exception as exc:  # noqa: BLE001
             logger.error("MoviePilotAppPush 推送请求异常: {}".format(exc))
             return False, "推送请求异常: {}".format(exc)
 
         if response is None:
-            return False, "推送网关无响应"
+            return False, "推送网关无响应（网络不可达或超时，请检查服务器网络/代理配置）"
 
         status = int(getattr(response, "status_code", 0) or 0)
         try:
