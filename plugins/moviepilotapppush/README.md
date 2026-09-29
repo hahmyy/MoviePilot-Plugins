@@ -46,7 +46,7 @@
 - 支持消息类型多选筛选（媒体服务器/订阅/整理入库/资源下载/站点/手动处理/其它/智能体/插件），不选则转发全部。
 - 配置页可自定义测试标题与内容，并用“发送测试（保存后立即发送一条）”开关立即发送；测试接口支持 title/text 查询参数覆盖。
 - 图标：仓库根 `icons/MoviePilotAppPush.png`（V2/V3 共用），索引 `icon` 字段一致。
-- 版本：`package.json` / `package.v2.json` 内 `MoviePilotAppPush` 版本 0.1.10，与插件类 `plugin_version` 一致。
+- 版本：`package.json` / `package.v2.json` 内 `MoviePilotAppPush` 版本 0.1.11，与插件类 `plugin_version` 一致。
 
 ## 华为 Push Kit 直连渠道（可选）
 
@@ -66,3 +66,22 @@
   华为字段控制为 `channel === 'huawei'`，避免所有渠道字段挤在同一版面。
 - 华为服务账号支持两种输入方式：直接粘贴 JSON 到文本框，或用文件选择框上传 `.json`；
   上传由前端读取文件内容写入 JSON 文本字段，服务端保存时再解析识别，表单 model 不保存 File 对象。
+
+## 推送 extras 字段契约（点击通知展示详情）
+
+极光与华为两条渠道下发同一组字段，字段名与含义不允许随意变更：
+
+| 字段 | 说明 |
+|---|---|
+| page | 固定 `system-message`，App 点击后跳转目标 |
+| title | 通知标题（截断 120 字） |
+| text | 通知正文（截断 300 字，避免华为 4096 字节消息体限制） |
+| msgtype | NotificationType 名称（如 Subscribe、MediaServer） |
+| channel | 来源渠道（如 wechat、telegram） |
+| source | 消息来源 |
+| userid | 目标用户 ID |
+| ts | 发送时间戳（秒） |
+| type | 兼容旧版别名，值与 msgtype 一致 |
+
+极光放在 notification.extras 与各平台 notification.<平台>.extras；华为放在
+payload.notification.clickAction.data。App 按以上字段解析为通知详情。

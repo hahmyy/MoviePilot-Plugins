@@ -37,6 +37,10 @@ MoviePilot 宿主代码和测试为准；V2 兼容实现以 V2 宿主 SDK 与官
 - 文件上传字段使用 `VFileInput` 搭配 `onUpdate:modelValue` 表达式，把文件内容读入文本字段；
   表单 model 中不得保存 File 对象，避免配置序列化失败；App 端不支持文件上传时至少提供粘贴输入。
 
+- 推送 extras 字段固定为：`page`（固定 system-message）、`title`、`text`（≤300 字）、
+  `msgtype`（NotificationType 名称）、`channel`、`source`、`userid`、`ts`（秒）；`type` 为
+  兼容旧版别名，值与 `msgtype` 一致。极光放 `notification.extras`（含各平台节点），
+  华为放 `payload.notification.clickAction.data`，两条渠道字段名与含义必须一致。
 ## 固定契约（不可随意变更）
 
 - 插件 ID 固定为 `MoviePilotAppPush`，目录保持 `moviepilotapppush`，V2/V3 双布局。

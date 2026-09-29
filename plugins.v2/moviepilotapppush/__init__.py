@@ -97,16 +97,36 @@ def _event_data_to_dict(data: Any) -> dict:
     return {}
 
 
-def _build_extras(event_data: dict) -> dict:
-    """从 NoticeMessage 事件数据中提取可下发的扩展字段。"""
-    extras: Dict[str, str] = {}
-    for key in ("channel", "type", "source", "userid"):
-        value = event_data.get(key)
-        if value is None:
-            continue
-        text = _coerce_str(value)
-        if text:
-            extras[key] = text
+def _build_extras(
+    event_data: dict, title: str = "", text: str = "", msgtype: str = ""
+) -> dict:
+    """构建推送附加字段契约（极光 extras 与华为 clickAction.data 共用）。
+
+    固定字段：page / title / text / msgtype / channel / source / userid / ts；
+    type 为兼容旧版别名，值与 msgtype 一致。text 截断到 300 字，避免超出
+    华为 4096 字节消息体限制。
+    """
+    data = event_data if isinstance(event_data, dict) else {}
+    raw_title = _coerce_str(title) or _coerce_str(data.get("title"))
+    raw_text = _coerce_str(text) or _coerce_str(data.get("text"))
+    type_name = (
+        _coerce_str(msgtype)
+        or _notification_type_name(data.get("type"))
+        or _coerce_str(data.get("msgtype"))
+    )
+    extras: dict[str, Any] = {
+        "page": "system-message",
+        "title": _truncate(raw_title, MAX_EXTRAS_TITLE_LENGTH),
+        "text": _truncate(raw_text, MAX_EXTRAS_TEXT_LENGTH),
+        "ts": int(time.time()),
+    }
+    if type_name:
+        extras["msgtype"] = type_name
+        extras["type"] = type_name
+    for key in ("channel", "source", "userid"):
+        value = _coerce_str(data.get(key))
+        if value:
+            extras[key] = value
     return extras
 
 
@@ -138,6 +158,9 @@ HUAWEI_PUSH_URL_TEMPLATE = "https://push-api.cloud.huawei.com/v3/{project_id}/me
 HUAWEI_DEFAULT_TOKEN_URI = "https://oauth-login.cloud.huawei.com/oauth2/v3/token"
 HUAWEI_JWT_BEARER_GRANT = "urn:ietf:params:oauth:grant-type:jwt-bearer"
 HUAWEI_SUCCESS_CODE = "80000000"
+MAX_EXTRAS_TITLE_LENGTH = 120
+MAX_EXTRAS_TEXT_LENGTH = 300
+MAX_HUAWEI_BODY_LENGTH = 1000
 
 
 # 华为 Push Kit 业务错误码与 HTTP 状态码的可读化说明（依据官方响应参数文档整理）
@@ -288,18 +311,21 @@ def _huawei_category_options() -> list:
     return [{"title": item, "value": item} for item in HUAWEI_CATEGORIES]
 
 
-def _build_huawei_payload(title: str, text: str, category: str, push_token: str) -> dict:
-    """按官方 v3 场景化消息结构拼装通知体。"""
+def _build_huawei_payload(
+    title: str, text: str, category: str, push_token: str, data: dict = None
+) -> dict:
+    """按官方 v3 场景化消息结构拼装通知体；点击数据放 clickAction.data。"""
     title = _coerce_str(title) or "MoviePilot"
     body = _coerce_str(text) or title
     category = _coerce_str(category) if _coerce_str(category) in HUAWEI_CATEGORIES else "MARKETING"
+    extras = data if isinstance(data, dict) else {}
     return {
         "payload": {
             "notification": {
                 "category": category,
                 "title": title,
                 "body": body,
-                "clickAction": {"actionType": 0},
+                "clickAction": {"actionType": 0, "data": extras},
             }
         },
         "target": {"token": [push_token]},
@@ -323,28 +349,26 @@ def _parse_huawei_response(status: int, body: Any) -> tuple:
 
 
 def _compose_notification(title: str, text: str, extras: dict) -> dict:
-    """按极光 v3 结构拼装多平台通知体。
-
-    - 标题、正文都有时：android/hmos 使用系统标题 + 正文，iOS 由于 APNs 只有
-      alert，把标题拼在正文前保证不丢信息。
-    - 只有标题或只有正文时：统一走 notification.alert。
-    - hmos 按厂商通道规范带 category（IM），鸿蒙厂商通道必填。
-    """
+    """按极光 v3 结构拼装多平台通知体，保证 extras 在通用与各平台节点都下发。"""
     title = _coerce_str(title)
     text = _coerce_str(text)
-    if title and text:
-        return {
-            "alert": text,
-            "android": {"alert": text, "title": title, "extras": extras},
-            "ios": {"alert": "{}\n{}".format(title, text), "extras": extras},
-            "hmos": {
-                "alert": text,
-                "title": title,
-                "category": "IM",
-                "extras": extras,
-            },
-        }
-    return {"alert": title or text, "extras": extras}
+    extras = extras if isinstance(extras, dict) else {}
+    alert = text or title
+    android = {"alert": alert, "extras": extras}
+    hmos = {"alert": alert, "category": "IM", "extras": extras}
+    if title:
+        android["title"] = title
+        hmos["title"] = title
+    return {
+        "alert": alert,
+        "extras": extras,
+        "android": android,
+        "ios": {
+            "alert": "{}\n{}".format(title, text) if title and text else alert,
+            "extras": extras,
+        },
+        "hmos": hmos,
+    }
 
 
 class MoviePilotAppPush(_PluginBase):
@@ -363,7 +387,7 @@ class MoviePilotAppPush(_PluginBase):
     # 插件图标
     plugin_icon = "MoviePilotAppPush.png"
     # 插件版本
-    plugin_version = "0.1.10"
+    plugin_version = "0.1.11"
     # 插件作者
     plugin_author = "hahmyy"
     # 作者主页
@@ -486,7 +510,8 @@ class MoviePilotAppPush(_PluginBase):
         """按自定义内容立即发送一条测试通知。"""
         title = self._test_title or self.TEST_TITLE
         text = self._test_text or self.TEST_TEXT
-        ok, message = self._push(title, text)
+        extras = _build_extras({}, title, text)
+        ok, message = self._push(title, text, extras=extras)
         self._record_event(
             "测试", title, text, {"code": 0 if ok else 1, "msg": message}, True
         )
@@ -930,7 +955,9 @@ class MoviePilotAppPush(_PluginBase):
             return {"code": 1, "msg": ready_message}, False
         send_title = _coerce_str(title) or self._test_title or self.TEST_TITLE
         send_text = _coerce_str(text) or self._test_text or self.TEST_TEXT
-        ok, message = self._push(send_title, send_text)
+        ok, message = self._push(
+            send_title, send_text, extras=_build_extras({}, send_title, send_text)
+        )
         return {"code": 0 if ok else 1, "msg": message}, True
 
 
@@ -1027,7 +1054,7 @@ class MoviePilotAppPush(_PluginBase):
         if type_name and self._msgtypes and type_name not in self._msgtypes:
             logger.debug("MoviePilotAppPush 消息类型 {} 未开启转发，已跳过".format(type_name))
             return
-        ok, message = self._push(title, text, extras=_build_extras(data))
+        ok, message = self._push(title, text, extras=_build_extras(data, title, text))
         self._record_event(
             "通知",
             title,
@@ -1042,10 +1069,10 @@ class MoviePilotAppPush(_PluginBase):
     def _push(self, title: str, text: str, extras: Optional[dict] = None) -> Tuple[bool, str]:
         """按配置渠道分发推送。"""
         if self._channel == "huawei":
-            return self._push_huawei(title, text)
+            return self._push_huawei(title, text, extras)
         return self._push_jpush(title, text, extras)
 
-    def _push_huawei(self, title: str, text: str) -> Tuple[bool, str]:
+    def _push_huawei(self, title: str, text: str, extras: Optional[dict] = None) -> Tuple[bool, str]:
         """华为 Push Kit v3 直连推送。"""
         if not self._token:
             return False, "未配置华为 Push Token"
@@ -1063,7 +1090,14 @@ class MoviePilotAppPush(_PluginBase):
             logger.error("MoviePilotAppPush 华为鉴权失败: {}".format(exc))
             return False, "华为鉴权失败: {}".format(exc)
         url = HUAWEI_PUSH_URL_TEMPLATE.format(project_id=project_id)
-        payload = _build_huawei_payload(title, text, self._hw_category, self._token)
+        extras = extras if isinstance(extras, dict) and extras else _build_extras({}, title, text)
+        payload = _build_huawei_payload(
+            _truncate(title, MAX_EXTRAS_TITLE_LENGTH) or title,
+            _truncate(text, MAX_HUAWEI_BODY_LENGTH) or text,
+            self._hw_category,
+            self._token,
+            extras,
+        )
         headers = {
             "Content-Type": "application/json",
             "Authorization": "Bearer {}".format(token),

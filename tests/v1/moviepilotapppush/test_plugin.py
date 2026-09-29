@@ -39,8 +39,8 @@ def test_manifest_and_plugin_are_v2_aligned() -> None:
         if isinstance(node, ast.ImportFrom)
     }
 
-    assert manifest["version"] == "0.1.10"
-    assert 'plugin_version = "0.1.10"' in source
+    assert manifest["version"] == "0.1.11"
+    assert 'plugin_version = "0.1.11"' in source
     assert manifest["icon"] == "MoviePilotAppPush.png"
     assert (ROOT / "icons" / manifest["icon"]).is_file()
     assert "app.core.event" in imports
@@ -94,7 +94,7 @@ def test_notice_message_forwards_title_text_and_extras(monkeypatch) -> None:
         event_type=module.EventType.NoticeMessage,
         event_data={
             "channel": "telegram",
-            "type": "notice",
+            "type": module.NotificationType.Subscribe,
             "title": "订阅完成",
             "text": "下载完成",
             "source": "test",
@@ -106,6 +106,10 @@ def test_notice_message_forwards_title_text_and_extras(monkeypatch) -> None:
     assert calls and calls[0][0] == "订阅完成" and calls[0][1] == "下载完成"
     extras = calls[0][2]
     assert extras.get("channel") == "telegram" and extras.get("userid") == "1"
+    assert extras.get("page") == "system-message"
+    assert extras.get("title") == "订阅完成" and extras.get("text") == "下载完成"
+    assert extras.get("msgtype") == "Subscribe"
+    assert isinstance(extras.get("ts"), int)
 
     calls.clear()
     empty = module.Event(
@@ -145,7 +149,7 @@ def test_v2_layouts_stay_identical() -> None:
 
     package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))["MoviePilotAppPush"]
     versioned_package = json.loads((ROOT / "package.v2.json").read_text(encoding="utf-8"))["MoviePilotAppPush"]
-    assert package["version"] == versioned_package["version"] == "0.1.10"
+    assert package["version"] == versioned_package["version"] == "0.1.11"
     assert package["icon"] == versioned_package["icon"] == "MoviePilotAppPush.png"
 
 
@@ -585,8 +589,88 @@ def test_huawei_end_to_end_against_mock_gateway(monkeypatch) -> None:
         assert push["headers"].get("push-type") == "0"
         assert push["headers"].get("Authorization") == "Bearer AT-mock"
         payload = json.loads(push["body"])
+        detail = payload["payload"]["notification"]["clickAction"]["data"]
+        assert detail["page"] == "system-message"
+        assert detail["title"] == "标题" and detail["text"] == "正文"
         assert payload["target"]["token"] == ["HW-TOKEN"]
         assert payload["payload"]["notification"]["title"] == "标题"
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_extras_contract_and_truncation() -> None:
+    """extras 字段契约稳定，text 截断到 300 字以内。"""
+    module = _load_plugin()
+    long_text = "长" * 500
+    extras = module._build_extras(
+        {
+            "title": "订阅完成",
+            "text": long_text,
+            "type": module.NotificationType.Subscribe,
+            "channel": "telegram",
+            "source": "moviepilot",
+            "userid": 1,
+        },
+        "订阅完成",
+        long_text,
+    )
+    assert extras["page"] == "system-message"
+    assert extras["title"] == "订阅完成"
+    assert extras["msgtype"] == "Subscribe" and extras["type"] == "Subscribe"
+    assert extras["channel"] == "telegram"
+    assert extras["source"] == "moviepilot"
+    assert extras["userid"] == "1"
+    assert isinstance(extras["ts"], int)
+    assert len(extras["text"]) <= module.MAX_EXTRAS_TEXT_LENGTH
+    assert len(extras["text"]) < len(long_text)
+
+
+def test_extras_are_identical_on_jpush_and_huawei() -> None:
+    """极光 extras 与华为 clickAction.data 的字段名与取值完全一致。"""
+    module = _load_plugin()
+    extras = module._build_extras(
+        {
+            "title": "标题",
+            "text": "正文",
+            "type": module.NotificationType.Other,
+            "channel": "wechat",
+            "source": "moviepilot",
+            "userid": 7,
+        }
+    )
+    jpush = module._compose_notification("标题", "正文", extras)
+    assert jpush["extras"] == extras
+    assert jpush["android"]["extras"] == extras
+    assert jpush["ios"]["extras"] == extras
+    assert jpush["hmos"]["extras"] == extras
+    huawei = module._build_huawei_payload("标题", "正文", "MARKETING", "HW-TOKEN", extras)
+    assert huawei["payload"]["notification"]["clickAction"]["data"] == extras
+
+
+def test_test_push_carries_detail_extras() -> None:
+    """测试推送同样携带详情 extras。"""
+    module = _load_plugin()
+    plugin = _new_instance(
+        module,
+        {
+            "enabled": True,
+            "apikey": "k",
+            "channel": "jpush",
+            "token": "t",
+            "appkey": "ak",
+            "mastersecret": "ms",
+        },
+    )
+    captured = {}
+
+    def fake_push(title, text, extras=None):
+        captured["extras"] = extras or {}
+        return True, "ok"
+
+    plugin._push = fake_push
+    plugin._execute_test("k", "自定义标题", "自定义内容")
+    assert captured["extras"]["page"] == "system-message"
+    assert captured["extras"]["title"] == "自定义标题"
+    assert captured["extras"]["text"] == "自定义内容"
+    assert isinstance(captured["extras"]["ts"], int)

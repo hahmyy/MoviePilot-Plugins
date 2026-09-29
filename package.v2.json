@@ -3,11 +3,12 @@
     "name": "App 推送",
     "description": "将 MoviePilot 通知推送到鸿蒙/Android/iOS 客户端（系统级推送）。",
     "labels": "通知,推送",
-    "version": "0.1.10",
+    "version": "0.1.11",
     "icon": "MoviePilotAppPush.png",
     "author": "hahmyy",
     "level": 1,
     "history": {
+      "v0.1.11": "推送 extras 补齐 title/text/msgtype/ts（保留 page/channel/source/userid，type 作为兼容别名），极光 extras 与华为 clickAction.data 统一下发，text 截断 300 字。",
       "v0.1.10": "华为渠道错误码可读化（业务码/HTTP 码给出中文原因与处理建议）；新增本地模拟网关端到端联调用例。固定 ID/接口/字段契约不变。",
       "v0.1.9": "配置页改用 v-show 即时切换渠道字段（兼容 MoviePilot Web 2.15.6），App 端自定义页同步支持渠道切换与华为字段。",
       "v0.1.8": "插件更名为 MoviePilotAppPush（避免与旧 ID 冲突）；配置页按已保存渠道只返回对应字段。",
