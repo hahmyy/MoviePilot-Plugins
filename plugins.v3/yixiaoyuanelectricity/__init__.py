@@ -948,7 +948,7 @@ class YiXiaoYuanElectricity(_PluginBase):
     plugin_name = "易校园寝室电量"
     plugin_desc = "查询易校园绑定的寝室电费/电量，@企业微信机器人即可查询，低于阈值自动提醒。"
     plugin_icon = "YiXiaoYuanElectricity.png"
-    plugin_version = "1.0.3"
+    plugin_version = "1.0.4"
     plugin_author = "hahmyy"
     author_url = "https://github.com/hahmyy"
     plugin_config_prefix = "yixiaoyuanelectricity_"
@@ -976,6 +976,7 @@ class YiXiaoYuanElectricity(_PluginBase):
         self._device_id = ""
         self._sec_token = ""
         self._need_captcha = False
+        self._sec_token_ts = 0.0
         self._captcha_png_b64 = ""
         self._chatid = ""
         self._room: dict | None = None
@@ -1025,6 +1026,8 @@ class YiXiaoYuanElectricity(_PluginBase):
         self._low_state = bool(state.get("low", False))
         self._last_alert_ts = float(state.get("last_alert_ts", 0) or 0)
         self._captcha_png_b64 = state.get("captcha_png") or ""
+        self._sec_token = state.get("sec_token") or self._sec_token
+        self._sec_token_ts = float(state.get("sec_token_ts") or 0)
 
         # 配置页里手填的 UID 优先（跳过短信登录的兜底路径）
         if self._uid_input and self._uid_input != self._uid:
@@ -1105,6 +1108,8 @@ class YiXiaoYuanElectricity(_PluginBase):
             "low": self._low_state,
             "last_alert_ts": self._last_alert_ts,
             "captcha_png": self._captcha_png_b64,
+            "sec_token": self._sec_token,
+            "sec_token_ts": self._sec_token_ts,
         }
         try:
             self.save_data("state", state)
@@ -1570,7 +1575,12 @@ class YiXiaoYuanElectricity(_PluginBase):
         return data
 
     async def api_send_code(self, request: Request = None) -> dict:
-        """发短信验证码；易校园风控要求时带上图形验证码。"""
+        """发短信验证码；易校园风控要求时带上图形验证码。
+
+        关键点：图形验证码是绑在**那一个** securityToken 上的。取图时用的是 token A，
+        发短信时如果又去换了一个 token B，服务端就会判定「验证码错误」（bizCode 10040）。
+        所以这里必须复用取图时的 token，只有过期或没有时才重新取。
+        """
         data = await self._read_payload(request)
         phone = str(data.get("phone") or self._phone).strip()
         captcha = str(data.get("captcha") or self._captcha or "").strip()
@@ -1580,21 +1590,45 @@ class YiXiaoYuanElectricity(_PluginBase):
             if not self._device_id:
                 self._device_id = gen_device_id()
                 self._persist()
-            info = get_security_info(self._device_id)
-            self._sec_token = info["securityToken"]
-            self._need_captcha = info["level"] != 0
+
+            fresh = (not self._sec_token) or (time.time() - self._sec_token_ts > 300)
+            if fresh:
+                info = get_security_info(self._device_id)
+                self._sec_token = info["securityToken"]
+                self._sec_token_ts = time.time()
+                self._need_captcha = info["level"] != 0
+                logger.info(f"[易校园电量] 换了新的 securityToken，level={info['level']}")
             if self._need_captcha and not captcha:
                 return {
                     "code": 2,
-                    "msg": "易校园要求图形验证码（通常是短信发太频繁触发的风控）。\n"
-                           "先点「查看图形验证码」看图片，把字符填到「图形验证码」里，再点发送验证码。",
+                    "msg": "易校园要求图形验证码（短信发太频繁触发的风控）。\n"
+                           "先点「获取图形验证码」，关掉配置窗口再打开就能看到图，"
+                           "把字符填到「图形验证码」里，再点发送验证码。",
                 }
             result = send_login_code(phone, self._device_id, self._sec_token, captcha)
         except Exception as exc:  # noqa: BLE001
-            logger.warning(f"[易校园电量] 发送验证码失败：{exc}")
-            return {"code": 1, "msg": f"发送失败：{exc}"}
+            msg = str(exc)
+            logger.warning(f"[易校园电量] 发送验证码失败：{msg}")
+            if "10040" in msg or "验证码错误" in msg:
+                self._reset_captcha()
+                return {
+                    "code": 1,
+                    "msg": "图形验证码不对或已过期（bizCode 10040）。\n"
+                           "再点一次「获取图形验证码」，关掉配置窗口重新打开看图，"
+                           "填新的字符后马上点发送验证码。",
+                }
+            return {"code": 1, "msg": f"发送失败：{msg}"}
+        # 成功后这张图就用掉了，清掉避免下次误用
+        self._reset_captcha()
         hint = "" if result.get("userExists") is not False else "（该号码可能还没注册易校园）"
         return {"code": 0, "msg": f"验证码已发送到 {phone}{hint}，收到后填到「短信验证码」里再点登录"}
+
+    def _reset_captcha(self) -> None:
+        """作废当前图形验证码与它绑定的 securityToken。"""
+        self._sec_token = ""
+        self._sec_token_ts = 0.0
+        self._captcha_png_b64 = ""
+        self._persist()
 
     async def api_captcha(self, request: Request = None) -> dict:
         """拉一张图形验证码存起来，并返回 base64（供配置页直接内嵌显示）。
@@ -1607,10 +1641,12 @@ class YiXiaoYuanElectricity(_PluginBase):
                 self._device_id = gen_device_id()
             info = get_security_info(self._device_id)
             self._sec_token = info["securityToken"]
+            self._sec_token_ts = time.time()
             self._need_captcha = info["level"] != 0
             png = get_captcha_png(self._device_id, self._sec_token)
             self._captcha_png_b64 = base64.b64encode(png).decode("ascii")
             self._persist()
+            logger.info(f"[易校园电量] 已拉取图形验证码（level={info['level']}）")
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[易校园电量] 取图形验证码失败：{exc}")
             return {"code": 1, "msg": f"获取图形验证码失败：{exc}"}
