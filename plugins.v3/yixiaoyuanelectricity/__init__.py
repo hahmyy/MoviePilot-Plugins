@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import http.cookiejar
 import json
 import os
 import random
@@ -394,18 +395,34 @@ def oauth_authorize(uid: str) -> tuple[str, dict]:
     if not code:
         raise HttpError(f"OAuth 跳转里没有 code：{location}")
 
-    status, headers, raw = _request("POST", BASE_APP + "/app/login/getUser4Authorize", {"code": code})
+    # 关键：这一步会连发 3 条 Set-Cookie，形如
+    #   shiroJID=<新的>; shiroJID=deleteMe(Max-Age=0); shiroJID=<最终可用的>
+    # 用 dict(resp.headers) 只能拿到第一条，那条随后就被 deleteMe 作废了，
+    # 后面查电量必然 204。必须用 CookieJar，让它按顺序覆盖，最后留下真正有效的那条。
+    jar = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPCookieProcessor(jar),
+        urllib.request.HTTPSHandler(context=SSL_CTX),
+    )
+    body = urllib.parse.urlencode({"code": code}).encode()
+    request = urllib.request.Request(
+        BASE_APP + "/app/login/getUser4Authorize", data=body, method="POST")
+    request.add_header("User-Agent", UA_APP)
+    request.add_header("Content-Type", "application/x-www-form-urlencoded")
+    try:
+        with opener.open(request, timeout=25) as resp:
+            raw = resp.read()
+    except urllib.error.HTTPError as exc:
+        raw = exc.read()
     res = _json(raw)
     if not res.get("success"):
         raise HttpError(f"换取会话失败：{res.get('message')}")
-    cookies = headers.get("Set-Cookie") or headers.get("set-cookie") or ""
     session = ""
-    for part in cookies.split(","):
-        if SESSION_KEY + "=" in part:
-            session = part.split(SESSION_KEY + "=", 1)[1].split(";")[0].strip()
-            break
-    if not session:
-        raise HttpError("没拿到 shiroJID 会话")
+    for cookie in jar:
+        if cookie.name == SESSION_KEY:
+            session = cookie.value
+    if not session or session == "deleteMe":
+        raise HttpError("没拿到有效的 shiroJID 会话")
     return session, res.get("data") or {}
 
 
@@ -948,7 +965,7 @@ class YiXiaoYuanElectricity(_PluginBase):
     plugin_name = "易校园寝室电量"
     plugin_desc = "查询易校园绑定的寝室电费/电量，@企业微信机器人即可查询，低于阈值自动提醒。"
     plugin_icon = "YiXiaoYuanElectricity.png"
-    plugin_version = "1.0.4"
+    plugin_version = "1.0.5"
     plugin_author = "hahmyy"
     author_url = "https://github.com/hahmyy"
     plugin_config_prefix = "yixiaoyuanelectricity_"
