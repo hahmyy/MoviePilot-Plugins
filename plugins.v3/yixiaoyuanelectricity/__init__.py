@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import http.cookiejar
@@ -663,6 +664,8 @@ class BotWorker(threading.Thread):
         self._stop = threading.Event()
         self._seen: list[str] = []
         self.ws: WebSocket | None = None
+        self.subscribed = False
+        self._reconnect_reason = ""
         self.status = "未启动"
         self.last_error = ""
         self.last_alert_ts = 0.0
@@ -708,6 +711,7 @@ class BotWorker(threading.Thread):
                 self.status = f"断开：{self.last_error}"
                 logger.warning(f"[易校园电量] 机器人连接异常：{self.last_error}")
             finally:
+                self.subscribed = False
                 try:
                     if self.ws:
                         self.ws.close()
@@ -724,6 +728,7 @@ class BotWorker(threading.Thread):
     def _connect(self) -> None:
         ws = WebSocket(WS_URL)
         ws.connect()
+        self._reconnect_reason = ""
         self.ws = ws
         self._last_recv = time.time()
         self._send_cmd(CMD_SUBSCRIBE, {"bot_id": self.plugin._bot_id, "secret": self.plugin._bot_secret})
@@ -761,6 +766,8 @@ class BotWorker(threading.Thread):
     # --- 主循环 -----------------------------------------------------
     def _loop(self) -> None:
         while not self._stop.is_set():
+            if self._reconnect_reason:
+                raise WSClosed(self._reconnect_reason)
             now = time.time()
             if now >= self._next_ping_at:
                 self._next_ping_at = now + 25
@@ -793,6 +800,7 @@ class BotWorker(threading.Thread):
             errcode = msg.get("errcode", 0)
             if str(headers.get("req_id", "")).startswith(CMD_SUBSCRIBE):
                 if errcode == 0:
+                    self.subscribed = True
                     self.status = "已连接（订阅成功）"
                     logger.info("[易校园电量] 机器人订阅成功")
                 else:
@@ -801,6 +809,9 @@ class BotWorker(threading.Thread):
                     self._stop.set()
             elif errcode:
                 logger.warning(f"[易校园电量] 回包异常 {errcode}: {msg.get('errmsg')}")
+                if errcode in (846609, 846604, 846608):
+                    # 订阅已失效/回复窗口失效，标记一下，由主循环重连
+                    self._reconnect_reason = f"订阅失效 {errcode}"
             return
         if cmd == CMD_CALLBACK:
             self._on_message(headers.get("req_id", ""), body)
@@ -1011,7 +1022,7 @@ class YiXiaoYuanElectricity(_PluginBase):
     plugin_name = "易校园寝室电量"
     plugin_desc = "查询易校园绑定的寝室电费/电量，@企业微信机器人即可查询，低于阈值自动提醒。"
     plugin_icon = "YiXiaoYuanElectricity.png"
-    plugin_version = "1.0.7"
+    plugin_version = "1.0.8"
     plugin_author = "hahmyy"
     author_url = "https://github.com/hahmyy"
     plugin_config_prefix = "yixiaoyuanelectricity_"
@@ -1814,37 +1825,36 @@ class YiXiaoYuanElectricity(_PluginBase):
         return {"code": 0, "msg": f"UID 登录成功：{self._school_name} · {room}"}
 
     async def api_test_bot(self, request: Request = None) -> dict:
+        """测试机器人连接。
+
+        注意不能另开一条长连接来测：同一个 bot 只允许一条连接，新连接订阅成功会把
+        常驻的那条顶掉（之后 846609，群里发消息就再也收不到）。所以这里只复用常驻
+        线程的状态，必要时按新参数重启它。
+        """
         data = await self._read_payload(request)
         bot_id = str(data.get("bot_id") or self._bot_id).strip()
         secret = str(data.get("bot_secret") or self._bot_secret).strip()
         if not bot_id or not secret:
             return {"code": 1, "msg": "请先填 BotID 和 Secret"}
-        try:
-            ws = WebSocket(WS_URL)
-            ws.connect()
-            ws.send_text(json.dumps({
-                "cmd": CMD_SUBSCRIBE,
-                "headers": {"req_id": "aibot_subscribe_test"},
-                "body": {"bot_id": bot_id, "secret": secret},
-            }, ensure_ascii=False))
-            deadline = time.time() + 15
-            ack = None
-            while time.time() < deadline:
-                if not ws.has_pending(1.0):
-                    continue
-                msg = json.loads(ws.recv_text())
-                if not msg.get("cmd"):
-                    ack = msg
-                    break
-            ws.close()
-        except Exception as exc:  # noqa: BLE001
-            return {"code": 1, "msg": f"连接失败：{exc}"}
-        if not ack:
-            return {"code": 1, "msg": "连接成功但没收到订阅回执"}
-        errcode = ack.get("errcode", -1)
-        if errcode == 0:
-            return {"code": 0, "msg": "机器人连接正常（订阅成功）"}
-        return {"code": 1, "msg": f"订阅失败 {errcode}：{ack.get('errmsg')}"}
+
+        if (bot_id, secret) != (self._bot_id, self._bot_secret):
+            self._bot_id, self._bot_secret = bot_id, secret
+            self._stop_worker()
+        if not (self._worker and self._worker.is_alive()):
+            self._start_worker()
+
+        deadline = time.time() + 12
+        while time.time() < deadline:
+            await asyncio.sleep(0.3)
+            worker = self._worker
+            if worker and worker.subscribed:
+                return {"code": 0, "msg": "机器人连接正常（长连接已订阅）"}
+            if worker and worker.last_error and "订阅失败" in worker.status:
+                return {"code": 1, "msg": f"订阅失败：{worker.status}"}
+        worker = self._worker
+        detail = worker.status if worker else "线程未启动"
+        return {"code": 1, "msg": f"12 秒内没等到订阅成功，当前状态：{detail}\n"
+                                  f"看日志里 [易校园电量] 开头的行"}
 
     async def api_test_query(self, request: Request = None) -> dict:
         result: dict = {}
