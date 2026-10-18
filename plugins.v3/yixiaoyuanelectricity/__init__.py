@@ -27,6 +27,8 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
+from fastapi import Request, Response
+
 try:  # V3 稳定入口
     from app.sdk.plugin import _PluginBase
 except Exception:  # noqa: BLE001 - 兼容旧宿主
@@ -302,25 +304,55 @@ def campus_form(device_id: str) -> dict:
     return {"appVersion": APP_VER, "deviceId": device_id, "platform": PLATFORM, "testAccount": "1"}
 
 
-def send_login_code(phone: str, device_id: str) -> dict:
-    """发短信验证码。返回 securityToken 信息。"""
+def get_security_info(device_id: str) -> dict:
+    """取 securityToken 与风控等级。
+
+    `level == 0` 表示可以直接发短信；`level != 0` 表示易校园要求先过图形验证码
+    （通常是短时间发太多次短信触发的风控）。
+    """
     _, _, raw = _request("POST", BASE_CAMPUS + "/common/security/token", campus_form(device_id))
     info = _json(raw)
     if not info.get("success"):
         raise HttpError(f"取 securityToken 失败：{info.get('message')}")
-    token = info["data"]["securityToken"]
+    data = info.get("data") or {}
+    return {"level": int(data.get("level") or 0), "securityToken": data.get("securityToken") or ""}
+
+
+def get_captcha_png(device_id: str, security_token: str) -> bytes:
+    """取图形验证码图片（PNG 字节）。"""
+    body = campus_form(device_id)
+    body["securityToken"] = security_token
+    _, _, raw = _request("POST", BASE_CAMPUS + "/common/security/imageCaptcha", body)
+    res = _json(raw)
+    if not res.get("success"):
+        raise HttpError(f"取图形验证码失败：{res.get('message')}")
+    data = res.get("data")
+    if not isinstance(data, str) or not data.strip():
+        raise HttpError("图形验证码为空")
+    if data.startswith("data:"):
+        data = data.split(",", 1)[1]
+    try:
+        return base64.b64decode(data)
+    except Exception as exc:  # noqa: BLE001
+        raise HttpError(f"图形验证码解码失败：{exc}")
+
+
+def send_login_code(phone: str, device_id: str, security_token: str, captcha: str = "") -> dict:
+    """发短信验证码；需要图形验证码时把 captcha 一起带上。"""
     body = campus_form(device_id)
     body.update({
-        "appSecurityToken": app_security_token(token, device_id),
-        "securityToken": token,
+        "appSecurityToken": app_security_token(security_token, device_id),
+        "securityToken": security_token,
         "sendCount": "1",
         "mobilePhone": phone,
     })
+    if captcha:
+        body["imageCaptchaValue"] = captcha
     _, _, raw = _request("POST", BASE_CAMPUS + "/compus/user/sendLoginVerificationCode", body)
     res = _json(raw)
     if not res.get("success"):
-        raise HttpError(f"发送验证码失败：{res.get('message')}（{res.get('bizCode')}）")
-    return {"level": info["data"].get("level", 0), "userExists": (res.get("data") or {}).get("userExists")}
+        raise HttpError(f"{res.get('message')}（bizCode {res.get('bizCode')}）")
+    return {"userExists": (res.get("data") or {}).get("userExists")}
 
 
 def verify_login(phone: str, device_id: str, code: str) -> dict:
@@ -916,7 +948,7 @@ class YiXiaoYuanElectricity(_PluginBase):
     plugin_name = "易校园寝室电量"
     plugin_desc = "查询易校园绑定的寝室电费/电量，@企业微信机器人即可查询，低于阈值自动提醒。"
     plugin_icon = "YiXiaoYuanElectricity.png"
-    plugin_version = "1.0.1"
+    plugin_version = "1.0.2"
     plugin_author = "hahmyy"
     author_url = "https://github.com/hahmyy"
     plugin_config_prefix = "yixiaoyuanelectricity_"
@@ -929,6 +961,7 @@ class YiXiaoYuanElectricity(_PluginBase):
         self._enabled = False
         self._phone = ""
         self._code = ""
+        self._captcha = ""
         self._uid_input = ""
         self._bot_id = ""
         self._bot_secret = ""
@@ -941,6 +974,8 @@ class YiXiaoYuanElectricity(_PluginBase):
         self._uid = ""
         self._session = ""
         self._device_id = ""
+        self._sec_token = ""
+        self._need_captcha = False
         self._chatid = ""
         self._room: dict | None = None
         self._school_name = ""
@@ -959,6 +994,7 @@ class YiXiaoYuanElectricity(_PluginBase):
         self._enabled = bool(config.get("enabled"))
         self._phone = str(config.get("phone") or "").strip()
         self._code = str(config.get("code") or "").strip()
+        self._captcha = str(config.get("captcha") or "").strip()
         self._uid_input = str(config.get("uid") or "").strip()
         self._bot_id = str(config.get("bot_id") or "").strip()
         self._bot_secret = str(config.get("bot_secret") or "").strip()
@@ -1025,9 +1061,10 @@ class YiXiaoYuanElectricity(_PluginBase):
         return {
             "enabled": self._enabled,
             "phone": self._phone,
-            # 验证码也存进配置：表单模型里始终有 code 这个 key，
-            # 页面刷新/保存后输入框不会丢值，按钮里 model.code 一定有定义
+            # 验证码/图形验证码也存进配置：表单模型里始终有这些 key，
+            # 页面刷新或保存后输入框不会丢值，按钮里 model.code 一定有定义
             "code": self._code,
+            "captcha": self._captcha,
             "uid": self._uid,
             "bot_id": self._bot_id,
             "bot_secret": self._bot_secret,
@@ -1140,6 +1177,26 @@ class YiXiaoYuanElectricity(_PluginBase):
             "text": label,
         }
 
+    @staticmethod
+    def _link_btn(label: str, path: str, color: str = "secondary",
+                  icon: str = "mdi-image") -> dict:
+        """生成一个在新标签页打开插件接口的按钮（例如图形验证码图片）。"""
+        js = (
+            "function(e) { "
+            f"window.open('/api/v1/plugin/YiXiaoYuanElectricity/{path}?t=' + Date.now(), '_blank') "
+            "}"
+        )
+        return {
+            "component": "VBtn",
+            "props": {
+                "color": color,
+                "variant": "flat",
+                "prepend-icon": icon,
+                "onclick": js,
+            },
+            "text": label,
+        }
+
     def get_form(self) -> tuple[list[dict], dict[str, Any]]:
         form = [
             {
@@ -1207,8 +1264,30 @@ class YiXiaoYuanElectricity(_PluginBase):
                                 "component": "VCol",
                                 "props": {"cols": 12, "sm": 4},
                                 "content": [self._btn("发送验证码", "send_code",
-                                                      "{phone: model.phone}",
+                                                      "{phone: model.phone, captcha: String(model.captcha || '')}",
                                                       icon="mdi-message-text")],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "sm": 8},
+                                "content": [{"component": "VTextField",
+                                             "props": {"model": "captcha",
+                                                       "label": "图形验证码（易校园要求时必填）",
+                                                       "placeholder": "点右边「查看图形验证码」后填这里",
+                                                       "persistent-hint": True,
+                                                       "hint": "短信发太频繁会被风控：提示「需要图形验证码」时，"
+                                                               "先点右边的按钮看图片，把字符填这里，再点发送验证码"}}],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "sm": 4},
+                                "content": [self._link_btn("查看图形验证码", "captcha.png",
+                                                           icon="mdi-image-search")],
                             },
                         ],
                     },
@@ -1447,6 +1526,8 @@ class YiXiaoYuanElectricity(_PluginBase):
         return [
             {"path": "/send_code", "endpoint": self.api_send_code, "methods": ["POST"],
              "auth": "bear", "summary": "发送易校园登录验证码"},
+            {"path": "/captcha.png", "endpoint": self.api_captcha, "methods": ["GET"],
+             "auth": "bear", "summary": "获取易校园图形验证码图片"},
             {"path": "/verify", "endpoint": self.api_verify, "methods": ["POST"],
              "auth": "bear", "summary": "验证码登录并绑定寝室"},
             {"path": "/set_uid", "endpoint": self.api_set_uid, "methods": ["POST"],
@@ -1462,35 +1543,83 @@ class YiXiaoYuanElectricity(_PluginBase):
         ]
 
     @staticmethod
-    def _payload(payload: Any = None, kwargs: dict | None = None) -> dict:
-        """兼容几种传参方式：JSON body、被包一层的 body、以及 query/kwargs。"""
+    async def _read_payload(request: Request | None = None) -> dict:
+        """从请求里取参数：JSON body / 表单 body / query 都兼容。
+
+        之前用 `payload: dict = None` 由 FastAPI 做 body 推断，在部分宿主版本上会
+        变成 422（前端显示「请求参数不正确」），所以这里自己读 body，不依赖签名推断。
+        """
         data: dict[str, Any] = {}
-        if isinstance(payload, dict):
-            data.update(payload)
-            nested = data.get("payload")
-            if isinstance(nested, dict):
-                data.update(data.pop("payload"))
-        for key, value in (kwargs or {}).items():
-            if key in ("self", "apikey") or value is None:
-                continue
-            data.setdefault(key, value)
+        if request is None:
+            return data
+        try:
+            for key, value in request.query_params.items():
+                data[key] = value
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            body = await request.body()
+        except Exception:  # noqa: BLE001
+            body = b""
+        if body:
+            try:
+                parsed = json.loads(body)
+                if isinstance(parsed, dict):
+                    data.update(parsed)
+            except Exception:  # noqa: BLE001
+                try:
+                    data.update(dict(urllib.parse.parse_qsl(body.decode("utf-8", "ignore"))))
+                except Exception:  # noqa: BLE001
+                    pass
+        nested = data.get("payload")
+        if isinstance(nested, dict):
+            data.update(nested)
+            data.pop("payload", None)
         return data
 
-    async def api_send_code(self, payload: Any = None, **kwargs) -> dict:
-        data = self._payload(payload, kwargs)
+    async def api_send_code(self, request: Request = None) -> dict:
+        """发短信验证码；易校园风控要求时带上图形验证码。"""
+        data = await self._read_payload(request)
         phone = str(data.get("phone") or self._phone).strip()
+        captcha = str(data.get("captcha") or self._captcha or "").strip()
         if not phone:
             return {"code": 1, "msg": "请先填手机号"}
         try:
             if not self._device_id:
                 self._device_id = gen_device_id()
                 self._persist()
-            result = send_login_code(phone, self._device_id)
+            info = get_security_info(self._device_id)
+            self._sec_token = info["securityToken"]
+            self._need_captcha = info["level"] != 0
+            if self._need_captcha and not captcha:
+                return {
+                    "code": 2,
+                    "msg": "易校园要求图形验证码（通常是短信发太频繁触发的风控）。\n"
+                           "先点「查看图形验证码」看图片，把字符填到「图形验证码」里，再点发送验证码。",
+                }
+            result = send_login_code(phone, self._device_id, self._sec_token, captcha)
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[易校园电量] 发送验证码失败：{exc}")
             return {"code": 1, "msg": f"发送失败：{exc}"}
         hint = "" if result.get("userExists") is not False else "（该号码可能还没注册易校园）"
         return {"code": 0, "msg": f"验证码已发送到 {phone}{hint}，收到后填到「短信验证码」里再点登录"}
+
+    async def api_captcha(self) -> Response:
+        """返回易校园图形验证码图片（浏览器新标签页直接打开）。"""
+        try:
+            if not self._device_id:
+                self._device_id = gen_device_id()
+            info = get_security_info(self._device_id)
+            self._sec_token = info["securityToken"]
+            self._need_captcha = info["level"] != 0
+            png = get_captcha_png(self._device_id, self._sec_token)
+            self._persist()
+            return Response(content=png, media_type="image/png",
+                            headers={"Cache-Control": "no-store"})
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[易校园电量] 取图形验证码失败：{exc}")
+            return Response(content=f"获取图形验证码失败：{exc}".encode("utf-8"),
+                            media_type="text/plain; charset=utf-8")
 
     def _complete_login(self, user: dict) -> None:
         """登录成功后统一收尾：换会话、查寝室、落盘。"""
@@ -1506,8 +1635,8 @@ class YiXiaoYuanElectricity(_PluginBase):
         self._persist()
         self.update_config(self._current_config())
 
-    async def api_verify(self, payload: Any = None, **kwargs) -> dict:
-        data = self._payload(payload, kwargs)
+    async def api_verify(self, request: Request = None) -> dict:
+        data = await self._read_payload(request)
         phone = str(data.get("phone") or self._phone).strip()
         # 验证码优先用本次请求带的，其次用配置里已保存的（页面刷新后还在）
         code = str(data.get("code") or self._code or "").strip()
@@ -1527,8 +1656,8 @@ class YiXiaoYuanElectricity(_PluginBase):
         room = (self._room or {}).get("displayName") or "未绑定寝室"
         return {"code": 0, "msg": f"登录成功：{self._school_name} · {room}\nUID {self._uid}"}
 
-    async def api_set_uid(self, payload: Any = None, **kwargs) -> dict:
-        data = self._payload(payload, kwargs)
+    async def api_set_uid(self, request: Request = None) -> dict:
+        data = await self._read_payload(request)
         uid = str(data.get("uid") or self._uid_input or "").strip()
         if not uid:
             return {"code": 1, "msg": "请先填 UID"}
@@ -1552,8 +1681,8 @@ class YiXiaoYuanElectricity(_PluginBase):
         room = (self._room or {}).get("displayName") or "未绑定寝室"
         return {"code": 0, "msg": f"UID 登录成功：{self._school_name} · {room}"}
 
-    async def api_test_bot(self, payload: Any = None, **kwargs) -> dict:
-        data = self._payload(payload, kwargs)
+    async def api_test_bot(self, request: Request = None) -> dict:
+        data = await self._read_payload(request)
         bot_id = str(data.get("bot_id") or self._bot_id).strip()
         secret = str(data.get("bot_secret") or self._bot_secret).strip()
         if not bot_id or not secret:
@@ -1585,7 +1714,7 @@ class YiXiaoYuanElectricity(_PluginBase):
             return {"code": 0, "msg": "机器人连接正常（订阅成功）"}
         return {"code": 1, "msg": f"订阅失败 {errcode}：{ack.get('errmsg')}"}
 
-    async def api_test_query(self, payload: Any = None, **kwargs) -> dict:
+    async def api_test_query(self, request: Request = None) -> dict:
         try:
             session = self._ensure_session()
             if not self._room:
@@ -1601,7 +1730,7 @@ class YiXiaoYuanElectricity(_PluginBase):
         except Exception as exc:  # noqa: BLE001
             return {"code": 1, "msg": f"查询失败：{exc}"}
 
-    async def api_test_push(self, payload: Any = None, **kwargs) -> dict:
+    async def api_test_push(self, request: Request = None) -> dict:
         if not self._chatid:
             return {"code": 1, "msg": "还没有群会话 ID：先把机器人拉进群，@ 它发一句「查电量」"}
         if not (self._worker and self._worker.ws):
