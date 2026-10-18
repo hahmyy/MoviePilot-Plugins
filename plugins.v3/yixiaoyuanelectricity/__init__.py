@@ -832,10 +832,14 @@ class BotWorker(threading.Thread):
         text = self._strip_mentions(content)
         logger.info(f"[易校园电量] 收到消息 user={userid or '-'} chat={chattype} 内容={text!r}")
 
+        # 先回一帧占位：查询要走几个 HTTP 请求，慢了会超过 req_id 的有效期（846605）
+        stream_id = self._open_stream(req_id)
+
         allowed = self.plugin._allowed_users()
         if allowed and userid not in allowed:
             self._reply(req_id, f"抱歉，{userid or '你'} 没有查询权限。\n"
-                                f"管理员可在插件配置的「允许使用的人」里加上你的 userid。")
+                                f"管理员可在插件配置的「允许使用的人」里加上你的 userid。",
+                        stream_id)
             return
 
         try:
@@ -843,7 +847,7 @@ class BotWorker(threading.Thread):
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[易校园电量] 处理消息失败：{exc}")
             answer = f"查询失败：{exc}"
-        self._reply(req_id, answer)
+        self._reply(req_id, answer, stream_id)
 
     @staticmethod
     def _strip_mentions(text: str) -> str:
@@ -879,35 +883,52 @@ class BotWorker(threading.Thread):
 
     def _describe_balance(self) -> str:
         plugin = self.plugin
-        session = plugin._ensure_session()
-        if not plugin._room:
-            rows = query_bind(session)
-            if not rows:
-                return "这个账号没有绑定寝室电量，先在易校园 App 里绑定「我的宿舍」。"
-            plugin._set_room(rows[0])
-        data = query_surplus(session, plugin._room)
-        room_name, value, unit, text = surplus_view(data, plugin._unit)
-        if value is None:
-            return f"{room_name} 没有返回数值：{json.dumps(data, ensure_ascii=False)[:200]}"
-        icon = "🔴" if value < plugin._threshold else "🟢"
-        lines = [f"{icon} **{room_name or plugin._room.get('displayName')}**", text]
-        left = value - plugin._threshold
-        lines.append(f"已低于阈值 **{plugin._threshold}** {unit}，建议尽快充值" if left < 0
-                     else f"距阈值 {plugin._threshold} {unit} 还有 {round(left, 2)}")
-        lines.append(f"<font color=\"comment\">{time.strftime('%Y-%m-%d %H:%M:%S')}</font>")
-        return "\n".join(lines)
 
-    def _reply(self, req_id: str, text: str) -> None:
-        """stream 回复：先发占位帧，等到 ack 再发正文（连发会被判版本冲突）。"""
+        def _run(session: str) -> str:
+            if not plugin._room:
+                rows = query_bind(session)
+                if not rows:
+                    return "这个账号没有绑定寝室电量，先在易校园 App 里绑定「我的宿舍」。"
+                plugin._set_room(rows[0])
+            data = query_surplus(session, plugin._room)
+            room_name, value, unit, text = surplus_view(data, plugin._unit)
+            if value is None:
+                return f"{room_name} 没有返回数值：{json.dumps(data, ensure_ascii=False)[:200]}"
+            icon = "🔴" if value < plugin._threshold else "🟢"
+            lines = [f"{icon} **{room_name or plugin._room.get('displayName')}**", text]
+            left = value - plugin._threshold
+            lines.append(f"已低于阈值 **{plugin._threshold}** {unit}，建议尽快充值" if left < 0
+                         else f"距阈值 {plugin._threshold} {unit} 还有 {round(left, 2)}")
+            lines.append(f"<font color=\"comment\">{time.strftime('%Y-%m-%d %H:%M:%S')}</font>")
+            return "\n".join(lines)
+
+        return plugin._call_with_session(_run)
+
+    def _open_stream(self, req_id: str) -> str:
+        """收到消息立刻发一帧占位，避免查询慢导致 req_id 过期（846605）。"""
         stream_id = f"stream_{os.urandom(4).hex()}"
+        if not req_id:
+            return stream_id
         try:
             self._send_cmd(CMD_RESPOND, {"msgtype": "stream", "stream": {
-                "id": stream_id, "content": "<think></think>", "finish": False}})
-            self._wait_ack(req_id, 3.0)
+                "id": stream_id, "content": "查询中…", "finish": False}})
+            self._wait_ack(req_id, 2.0)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[易校园电量] 发送占位帧失败：{exc}")
+        return stream_id
+
+    def _reply(self, req_id: str, text: str, stream_id: str = "") -> None:
+        """发正文帧（finish=true）。stream_id 由 _open_stream 传入以复用同一个气泡。"""
+        stream_id = stream_id or f"stream_{os.urandom(4).hex()}"
+        try:
             self._send_cmd(CMD_RESPOND, {"msgtype": "stream", "stream": {
                 "id": stream_id, "content": text, "finish": True}})
-            self._wait_ack(req_id, 3.0)
-            logger.info(f"[易校园电量] 已回复 {len(text)} 字")
+            ack = self._wait_ack(req_id, 3.0)
+            if ack and ack.get("errcode"):
+                logger.warning(f"[易校园电量] 回复被拒：errcode={ack.get('errcode')} "
+                               f"{ack.get('errmsg')}（846605 表示 req_id 已失效，通常是回复太慢）")
+            else:
+                logger.info(f"[易校园电量] 已回复 {len(text)} 字")
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[易校园电量] 回复失败：{exc}")
 
@@ -915,14 +936,22 @@ class BotWorker(threading.Thread):
     def check_balance(self) -> None:
         plugin = self.plugin
         self.last_check_ts = time.time()
-        session = plugin._ensure_session()
-        if not plugin._room:
-            rows = query_bind(session)
-            if not rows:
-                logger.warning("[易校园电量] 没有绑定寝室，跳过")
-                return
-            plugin._set_room(rows[0])
-        data = query_surplus(session, plugin._room)
+        snapshot: dict = {}
+
+        def _run(session: str) -> None:
+            if not plugin._room:
+                rows = query_bind(session)
+                if not rows:
+                    logger.warning("[易校园电量] 没有绑定寝室，跳过")
+                    return
+                plugin._set_room(rows[0])
+            data = query_surplus(session, plugin._room)
+            snapshot["data"] = data
+
+        plugin._call_with_session(_run)
+        if not snapshot.get("data"):
+            return
+        data = snapshot["data"]
         room_name, value, unit, text = surplus_view(data, plugin._unit)
         self.last_value = value
         if value is None:
@@ -965,7 +994,7 @@ class YiXiaoYuanElectricity(_PluginBase):
     plugin_name = "易校园寝室电量"
     plugin_desc = "查询易校园绑定的寝室电费/电量，@企业微信机器人即可查询，低于阈值自动提醒。"
     plugin_icon = "YiXiaoYuanElectricity.png"
-    plugin_version = "1.0.5"
+    plugin_version = "1.0.6"
     plugin_author = "hahmyy"
     author_url = "https://github.com/hahmyy"
     plugin_config_prefix = "yixiaoyuanelectricity_"
@@ -1157,16 +1186,15 @@ class YiXiaoYuanElectricity(_PluginBase):
         return [x.strip() for x in re.split(r"[,，\s]+", self._allowed) if x.strip()]
 
     def _ensure_session(self) -> str:
-        """拿 shiroJID：有缓存先用，过期再换；换失败抛错。"""
+        """拿 shiroJID：有缓存直接用（不额外发请求），没有才去换。
+
+        以前每次都用 query_bind 预校验一次，而 query_bind 内部要试 3 个 bindType，
+        等于一次查询先打 3 个请求，机器人回复经常因此超过企业微信的 req_id 时限。
+        """
         if not self._uid:
-            raise HttpError("还没有登录：先在配置页用手机号 + 验证码登录")
+            raise HttpError("还没有登录：先在配置页用手机号 + 验证码登录或者填 UID")
         if self._session:
-            try:
-                query_bind(self._session)
-                return self._session
-            except HttpError as exc:
-                if "过期" not in str(exc):
-                    raise
+            return self._session
         session, info = oauth_authorize(self._uid)
         self._session = session
         if info:
@@ -1174,6 +1202,17 @@ class YiXiaoYuanElectricity(_PluginBase):
             self._school_code = info.get("schoolCode") or self._school_code
         self._persist()
         return session
+
+    def _call_with_session(self, func):
+        """执行一次需要会话的操作；碰到 204 就换会话重试一次。"""
+        try:
+            return func(self._ensure_session())
+        except HttpError as exc:
+            if "过期" not in str(exc):
+                raise
+            logger.info("[易校园电量] 会话过期，重新换取 shiroJID")
+            self._session = ""
+            return func(self._ensure_session())
 
     # ------------------------------------------------------------------
     # 配置页
@@ -1791,20 +1830,29 @@ class YiXiaoYuanElectricity(_PluginBase):
         return {"code": 1, "msg": f"订阅失败 {errcode}：{ack.get('errmsg')}"}
 
     async def api_test_query(self, request: Request = None) -> dict:
-        try:
-            session = self._ensure_session()
+        result: dict = {}
+
+        def _run(session: str) -> None:
             if not self._room:
                 rows = query_bind(session)
                 if not rows:
-                    return {"code": 1, "msg": "这个账号没有绑定寝室电量（先在易校园 App 绑定「我的宿舍」）"}
+                    result["msg"] = "这个账号没有绑定寝室电量（先在易校园 App 绑定「我的宿舍」）"
+                    return
                 self._set_room(rows[0])
             data = query_surplus(session, self._room)
             room_name, value, unit, text = surplus_view(data, self._unit)
             if not self._unit and unit:
                 self._unit = unit
-            return {"code": 0, "msg": f"{room_name or self._room.get('displayName')}\n{text}"}
+            result["msg"] = f"{room_name or self._room.get('displayName')}\n{text}"
+
+        try:
+            self._call_with_session(_run)
         except Exception as exc:  # noqa: BLE001
             return {"code": 1, "msg": f"查询失败：{exc}"}
+        if not result.get("msg"):
+            return {"code": 1, "msg": "没有取到数据"}
+        ok = "没有绑定" not in result["msg"]
+        return {"code": 0 if ok else 1, "msg": result["msg"]}
 
     async def api_test_push(self, request: Request = None) -> dict:
         if not self._chatid:
