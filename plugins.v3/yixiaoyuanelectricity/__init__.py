@@ -891,7 +891,86 @@ class BotWorker(threading.Thread):
             return (f"寝室：{room}\n阈值：{plugin._threshold} {plugin._unit or ''}\n"
                     f"轮询：每 {plugin._interval} 分钟\n"
                     f"学校：{plugin._school_name}（{plugin._school_code}）")
+        if any(k in t for k in ("什么时候", "几点", "高峰", "曲线")):
+            return self._peak_report()
+        if "趋势" in t or "每天" in t:
+            return self._trend_report()
+        if any(k in t for k in ("用了多少", "用量", "用电量", "消耗", "花了多少", "花了")):
+            return self._usage_report(t)
+        if any(k in t for k in ("查电量", "余额", "多少钱", "还有多少", "剩多少")):
+            return self._describe_balance()
+        answer = plugin._ask_llm(t)
+        if answer:
+            return answer
         return self._describe_balance()
+
+    def _usage_range(self, text: str) -> tuple[str, float, float]:
+        """从问题里解析时间范围，返回 (标签, 起始时间戳, 结束时间戳)。"""
+        now = time.time()
+        local = time.localtime(now)
+        today = time.mktime((local.tm_year, local.tm_mon, local.tm_mday, 0, 0, 0, 0, 0, -1))
+        if "昨天" in text or "昨日" in text:
+            return "昨天", today - 86400, today - 1
+        if "前天" in text:
+            return "前天", today - 2 * 86400, today - 86400 - 1
+        if any(k in text for k in ("本周", "这周", "这个星期")):
+            monday = today - (local.tm_wday * 86400)
+            return "本周", monday, now
+        if "上周" in text:
+            monday = today - ((local.tm_wday + 7) * 86400)
+            return "上周", monday, monday + 7 * 86400 - 1
+        matched = re.search(r"(?:最近|近)\s*([0-9]+)\s*天", text)
+        if matched:
+            days = max(1, min(90, int(matched.group(1))))
+            return f"最近 {days} 天", now - days * 86400, now
+        if "月" in text:
+            first = time.mktime((local.tm_year, local.tm_mon, 1, 0, 0, 0, 0, 0, -1))
+            return "本月", first, now
+        return "今天", today, now
+
+    def _usage_report(self, text: str) -> str:
+        plugin = self.plugin
+        label, start, end = self._usage_range(text)
+        stat = plugin._usage_slice(start, end)
+        unit = plugin._unit or "元"
+        if stat["points"] == 0:
+            return (f"{label}还没有采样数据。\n"
+                    f"插件每 {plugin._interval} 分钟记一次，攒够两个点才能算用量；"
+                    f"也可以多问我几次余额来加快积累。")
+        lines = [f"**{label}用量**（{unit}）", f"· 消耗：**{stat['consumed']}**"]
+        if stat["topup"]:
+            lines.append(f"· 充值：{stat['topup']}")
+        lines.append(f"· 采样：{stat['points']} 次")
+        if stat["points"] < 4:
+            lines.append("_采样点偏少，数字仅供参考_")
+        return "\n".join(lines)
+
+    def _peak_report(self) -> str:
+        plugin = self.plugin
+        hourly = plugin._hourly_profile(7)
+        if not hourly:
+            return "还没有足够的分时数据，先让它跑一两天。"
+        unit = plugin._unit or "元"
+        top = sorted(hourly.items(), key=lambda kv: kv[1], reverse=True)[:3]
+        lines = ["**近 7 天用电高峰**"]
+        for hour, used in top:
+            lines.append(f"· {hour:02d}:00-{hour + 1:02d}:00 约 {used} {unit}")
+        quiet = min(hourly.items(), key=lambda kv: kv[1])
+        lines.append(f"· 最省的时候：{quiet[0]:02d} 点 约 {quiet[1]} {unit}")
+        return "\n".join(lines)
+
+    def _trend_report(self) -> str:
+        plugin = self.plugin
+        daily = plugin._daily_profile(7)
+        if not daily:
+            return "还没有按天的数据，先让它跑一两天。"
+        unit = plugin._unit or "元"
+        lines = ["**近 7 天每日用量**"]
+        for item in daily:
+            lines.append(f"· {item['day']}：{item['used']} {unit}")
+        avg = round(sum(i["used"] for i in daily) / len(daily), 2)
+        lines.append(f"平均 {avg} {unit}/天")
+        return "\n".join(lines)
 
     def _describe_balance(self) -> str:
         plugin = self.plugin
@@ -906,6 +985,7 @@ class BotWorker(threading.Thread):
             room_name, value, unit, text = surplus_view(data, plugin._unit)
             if value is None:
                 return f"{room_name} 没有返回数值：{json.dumps(data, ensure_ascii=False)[:200]}"
+            plugin._record_sample(value, unit)
             icon = "🔴" if value < plugin._threshold else "🟢"
             lines = [f"{icon} **{room_name or plugin._room.get('displayName')}**", text]
             left = value - plugin._threshold
@@ -985,6 +1065,7 @@ class BotWorker(threading.Thread):
         if value is None:
             logger.warning(f"[易校园电量] 响应里没有数值：{json.dumps(data, ensure_ascii=False)[:200]}")
             return
+        plugin._record_sample(value, unit)
         room_name = room_name or plugin._room.get("displayName") or "寝室"
         logger.info(f"[易校园电量] 当前 {room_name} {text}（阈值 {plugin._threshold} {unit}）")
 
@@ -1022,7 +1103,7 @@ class YiXiaoYuanElectricity(_PluginBase):
     plugin_name = "易校园寝室电量"
     plugin_desc = "查询易校园绑定的寝室电费/电量，@企业微信机器人即可查询，低于阈值自动提醒。"
     plugin_icon = "YiXiaoYuanElectricity.png"
-    plugin_version = "1.0.8"
+    plugin_version = "1.1.0"
     plugin_author = "hahmyy"
     author_url = "https://github.com/hahmyy"
     plugin_config_prefix = "yixiaoyuanelectricity_"
@@ -1044,6 +1125,9 @@ class YiXiaoYuanElectricity(_PluginBase):
         self._allowed = ""
         self._unit = ""
         self._re_alert_hours = 6
+        self._llm_base = ""
+        self._llm_key = ""
+        self._llm_model = ""
         # 运行态
         self._uid = ""
         self._session = ""
@@ -1084,6 +1168,9 @@ class YiXiaoYuanElectricity(_PluginBase):
             self._interval = 30
         self._allowed = str(config.get("allowed_users") or "").strip()
         self._unit = str(config.get("unit") or "").strip()
+        self._llm_base = str(config.get("llm_base") or "").strip()
+        self._llm_key = str(config.get("llm_key") or "").strip()
+        self._llm_model = str(config.get("llm_model") or "").strip()
         try:
             self._re_alert_hours = float(config.get("re_alert_hours") or 6)
         except (TypeError, ValueError):
@@ -1152,6 +1239,9 @@ class YiXiaoYuanElectricity(_PluginBase):
             "allowed_users": self._allowed,
             "unit": self._unit,
             "re_alert_hours": self._re_alert_hours,
+            "llm_base": self._llm_base,
+            "llm_key": self._llm_key,
+            "llm_model": self._llm_model,
             "onlyonce": False,
         }
 
@@ -1212,6 +1302,160 @@ class YiXiaoYuanElectricity(_PluginBase):
 
     def _allowed_users(self) -> list[str]:
         return [x.strip() for x in re.split(r"[,，\s]+", self._allowed) if x.strip()]
+
+    # ------------------------------------------------------------------
+    # 用电采样与统计
+    #
+    # 这所学校没有「用电记录」接口（ISIMS 那套要 namespace/signkey，普通端点全是空），
+    # 所以只能自己采样：每查到一次余额就记一个点，用相邻两点的差值反推用量。
+    # 余额上涨视为充值，不算消耗。
+    # ------------------------------------------------------------------
+    MAX_SAMPLES = 5000
+
+    def _history_load(self) -> list[dict]:
+        try:
+            data = self.get_data("usage_history")
+            if isinstance(data, list):
+                return data
+        except Exception:  # noqa: BLE001
+            pass
+        return []
+
+    def _record_sample(self, value: float, unit: str) -> None:
+        """记一个采样点；同一分钟内重复查询只保留最后一个。"""
+        try:
+            history = self._history_load()
+            now = int(time.time())
+            if history and now - int(history[-1].get("ts", 0)) < 60:
+                history[-1] = {"ts": now, "v": round(float(value), 2)}
+            else:
+                history.append({"ts": now, "v": round(float(value), 2)})
+            history = history[-self.MAX_SAMPLES:]
+            self.save_data("usage_history", history)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[易校园电量] 保存采样失败：{exc}")
+
+    def _usage_slice(self, start_ts: float, end_ts: float) -> dict:
+        """统计 [start, end] 内的消耗、充值、采样数。"""
+        history = self._history_load()
+        consumed = 0.0
+        topup = 0.0
+        points = 0
+        for prev, cur in zip(history, history[1:]):
+            ts = int(cur.get("ts") or 0)
+            if ts < start_ts or ts > end_ts:
+                continue
+            points += 1
+            diff = float(prev.get("v") or 0) - float(cur.get("v") or 0)
+            if diff > 0:
+                consumed += diff
+            elif diff < 0:
+                topup += -diff
+        return {"consumed": round(consumed, 2), "topup": round(topup, 2), "points": points}
+
+    def _hourly_profile(self, days: int = 7) -> dict:
+        """按小时统计最近 N 天的消耗，用于回答「几点用得多」。"""
+        history = self._history_load()
+        since = time.time() - days * 86400
+        buckets: dict[int, float] = {}
+        for prev, cur in zip(history, history[1:]):
+            ts = int(cur.get("ts") or 0)
+            if ts < since:
+                continue
+            diff = float(prev.get("v") or 0) - float(cur.get("v") or 0)
+            if diff <= 0:
+                continue
+            hour = time.localtime((int(prev.get("ts") or 0) + ts) // 2).tm_hour
+            buckets[hour] = buckets.get(hour, 0.0) + diff
+        return {h: round(v, 2) for h, v in sorted(buckets.items())}
+
+    def _daily_profile(self, days: int = 7) -> list[dict]:
+        """按天统计最近 N 天的消耗。"""
+        history = self._history_load()
+        since = time.time() - days * 86400
+        buckets: dict[str, float] = {}
+        for prev, cur in zip(history, history[1:]):
+            ts = int(cur.get("ts") or 0)
+            if ts < since:
+                continue
+            diff = float(prev.get("v") or 0) - float(cur.get("v") or 0)
+            if diff <= 0:
+                continue
+            day = time.strftime("%m-%d", time.localtime((int(prev.get("ts") or 0) + ts) // 2))
+            buckets[day] = buckets.get(day, 0.0) + diff
+        return [{"day": d, "used": round(v, 2)} for d, v in sorted(buckets.items())]
+
+    # ------------------------------------------------------------------
+    # 可选：OpenAI 兼容的 LLM
+    # ------------------------------------------------------------------
+    def _llm_ready(self) -> bool:
+        return bool(self._llm_base and self._llm_key and self._llm_model)
+
+    def _usage_context(self) -> str:
+        """给 LLM 的数据上下文：当前值 + 近 7 天统计 + 分时分布。"""
+        lines = []
+        room = (self._room or {}).get("displayName") or "寝室"
+        unit = self._unit or "元"
+        last = self._history_load()[-1:] or [{}]
+        if last[0].get("v") is not None:
+            lines.append(f"当前余额：{last[0]['v']} {unit}（阈值 {self._threshold} {unit}）")
+        lines.append(f"寝室：{room}")
+        for name, days in (("今天", 0), ("近 7 天", 7)):
+            if days:
+                st = self._usage_slice(time.time() - days * 86400, time.time())
+                lines.append(f"{name}消耗：{st['consumed']} {unit}"
+                             f"（充值 {st['topup']} {unit}，采样 {st['points']} 次）")
+            else:
+                now = time.localtime()
+                start = time.mktime((now.tm_year, now.tm_mon, now.tm_mday, 0, 0, 0, 0, 0, -1))
+                st = self._usage_slice(start, time.time())
+                lines.append(f"{name}消耗：{st['consumed']} {unit}（采样 {st['points']} 次）")
+        daily = self._daily_profile(7)
+        if daily:
+            lines.append("每日消耗：" + "，".join(f"{d['day']} {d['used']}" for d in daily))
+        hourly = self._hourly_profile(7)
+        if hourly:
+            top = sorted(hourly.items(), key=lambda kv: kv[1], reverse=True)[:3]
+            lines.append("近 7 天用电最多的小时：" + "，".join(f"{h}点 {v}" for h, v in top))
+        return "\n".join(lines)
+
+    def _ask_llm(self, question: str) -> str:
+        """调用 OpenAI 兼容接口；失败返回空串，由调用方退回确定性回答。"""
+        if not self._llm_ready():
+            return ""
+        url = self._llm_base.rstrip("/") + "/chat/completions"
+        system = (
+            "你是寝室电费助手。只根据用户提供的数据回答，绝对不要编造数字或时间。"
+            "数据里没有的就直说没有。回答用中文，简洁（不超过 150 字），"
+            "必要时给一句省电或充值建议。"
+        )
+        payload = {
+            "model": self._llm_model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": f"数据：\n{self._usage_context()}\n\n问题：{question}"},
+            ],
+            "temperature": 0.3,
+            "max_tokens": 500,
+        }
+        try:
+            req = urllib.request.Request(
+                url, data=json.dumps(payload).encode("utf-8"), method="POST",
+                headers={"Content-Type": "application/json",
+                         "Authorization": f"Bearer {self._llm_key}"},
+            )
+            with urllib.request.urlopen(req, timeout=30, context=SSL_CTX) as resp:
+                data = json.loads(resp.read().decode("utf-8", "replace"))
+            return (data.get("choices") or [{}])[0].get("message", {}).get("content", "").strip()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[易校园电量] LLM 调用失败：{exc}")
+            return ""
+
+    def _test_llm(self) -> str:
+        if not self._llm_ready():
+            return "没填 LLM 的地址 / Key / 模型"
+        answer = self._ask_llm("现在余额大概什么水平？一句话总结。")
+        return answer or "调用失败，看日志里的 LLM 调用失败"
 
     def _ensure_session(self) -> str:
         """拿 shiroJID：有缓存直接用（不额外发请求），没有才去换。
@@ -1519,6 +1763,63 @@ class YiXiaoYuanElectricity(_PluginBase):
                             "component": "VCol",
                             "props": {"cols": 12},
                             "content": [{
+                                "component": "VDivider",
+                                "props": {"class": "my-2"},
+                            }, {
+                                "component": "VSubheader",
+                                "props": {"class": "text-subtitle-2"},
+                                "text": "4. AI 问答（可选，填了就能用自然语言问用量）",
+                            }],
+                        }],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "sm": 6},
+                                "content": [{"component": "VTextField",
+                                             "props": {"model": "llm_base",
+                                                       "label": "API 地址（OpenAI 兼容）",
+                                                       "placeholder": "https://api.deepseek.com/v1",
+                                                       "persistent-hint": True,
+                                                       "hint": "填到 /v1 为止，插件会拼 /chat/completions"}}],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "sm": 6},
+                                "content": [{"component": "VTextField",
+                                             "props": {"model": "llm_model",
+                                                       "label": "模型名",
+                                                       "placeholder": "deepseek-chat"}}],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "sm": 8},
+                                "content": [{"component": "VTextField",
+                                             "props": {"model": "llm_key",
+                                                       "label": "API Key",
+                                                       "type": "password"}}],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "sm": 4},
+                                "content": [self._btn("测试 AI 问答", "test_ai", "{}",
+                                                      color="info", icon="mdi-brain")],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [{
+                            "component": "VCol",
+                            "props": {"cols": 12},
+                            "content": [{
                                 "component": "VTextField",
                                 "props": {"model": "allowed_users",
                                           "label": "允许使用的人（企业微信 userid，逗号分隔；留空=所有人）",
@@ -1619,6 +1920,8 @@ class YiXiaoYuanElectricity(_PluginBase):
              "auth": "bear", "summary": "测试查询寝室余额"},
             {"path": "/test_push", "endpoint": self.api_test_push, "methods": ["POST"],
              "auth": "bear", "summary": "发送一条测试提醒"},
+            {"path": "/test_ai", "endpoint": self.api_test_ai, "methods": ["POST"],
+             "auth": "bear", "summary": "测试 LLM 问答"},
             {"path": "/status", "endpoint": self.api_status, "methods": ["GET"],
              "auth": "bear", "summary": "查询插件当前状态"},
         ]
@@ -1897,6 +2200,22 @@ class YiXiaoYuanElectricity(_PluginBase):
         if code == 0:
             return {"code": 0, "msg": "测试提醒已发送，去群里看看"}
         return {"code": 1, "msg": f"发送失败，errcode={code}"}
+
+    async def api_test_ai(self, request: Request = None) -> dict:
+        """测试 LLM 是否可用（用一条真实数据提问）。"""
+        data = await self._read_payload(request)
+        self._llm_base = str(data.get("llm_base") or self._llm_base).strip()
+        self._llm_model = str(data.get("llm_model") or self._llm_model).strip()
+        if data.get("llm_key"):
+            self._llm_key = str(data["llm_key"]).strip()
+        if not self._llm_ready():
+            return {"code": 1, "msg": "请先填 API 地址、模型名和 Key"}
+        answer = await asyncio.to_thread(self._test_llm)
+        if not answer:
+            return {"code": 1, "msg": "调用失败，看日志里的 LLM 调用失败"}
+        if "没填" in answer or "失败" in answer:
+            return {"code": 1, "msg": answer}
+        return {"code": 0, "msg": f"AI 可用，示例回答：\n{answer}"}
 
     async def api_status(self) -> dict:
         state = self._load_state()
