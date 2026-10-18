@@ -916,7 +916,7 @@ class YiXiaoYuanElectricity(_PluginBase):
     plugin_name = "易校园寝室电量"
     plugin_desc = "查询易校园绑定的寝室电费/电量，@企业微信机器人即可查询，低于阈值自动提醒。"
     plugin_icon = "YiXiaoYuanElectricity.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     plugin_author = "hahmyy"
     author_url = "https://github.com/hahmyy"
     plugin_config_prefix = "yixiaoyuanelectricity_"
@@ -928,6 +928,8 @@ class YiXiaoYuanElectricity(_PluginBase):
         # 配置
         self._enabled = False
         self._phone = ""
+        self._code = ""
+        self._uid_input = ""
         self._bot_id = ""
         self._bot_secret = ""
         self._threshold = 20.0
@@ -956,6 +958,8 @@ class YiXiaoYuanElectricity(_PluginBase):
         config = config or {}
         self._enabled = bool(config.get("enabled"))
         self._phone = str(config.get("phone") or "").strip()
+        self._code = str(config.get("code") or "").strip()
+        self._uid_input = str(config.get("uid") or "").strip()
         self._bot_id = str(config.get("bot_id") or "").strip()
         self._bot_secret = str(config.get("bot_secret") or "").strip()
         try:
@@ -983,6 +987,13 @@ class YiXiaoYuanElectricity(_PluginBase):
         self._school_code = state.get("school_code", "")
         self._low_state = bool(state.get("low", False))
         self._last_alert_ts = float(state.get("last_alert_ts", 0) or 0)
+
+        # 配置页里手填的 UID 优先（跳过短信登录的兜底路径）
+        if self._uid_input and self._uid_input != self._uid:
+            self._uid = self._uid_input
+            self._session = ""
+            self._room = None
+            self._persist()
 
         if self._enabled and self._bot_id and self._bot_secret:
             self._start_worker()
@@ -1014,6 +1025,10 @@ class YiXiaoYuanElectricity(_PluginBase):
         return {
             "enabled": self._enabled,
             "phone": self._phone,
+            # 验证码也存进配置：表单模型里始终有 code 这个 key，
+            # 页面刷新/保存后输入框不会丢值，按钮里 model.code 一定有定义
+            "code": self._code,
+            "uid": self._uid,
             "bot_id": self._bot_id,
             "bot_secret": self._bot_secret,
             "threshold": self._threshold,
@@ -1180,15 +1195,17 @@ class YiXiaoYuanElectricity(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "sm": 6},
+                                "props": {"cols": 12, "sm": 8},
                                 "content": [{"component": "VTextField",
                                              "props": {"model": "phone",
                                                        "label": "手机号（易校园登录用）",
-                                                       "placeholder": "13800000000"}}],
+                                                       "placeholder": "13800000000",
+                                                       "persistent-hint": True,
+                                                       "hint": "填完先点右边的「发送验证码」"}}],
                             },
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "sm": 6},
+                                "props": {"cols": 12, "sm": 4},
                                 "content": [self._btn("发送验证码", "send_code",
                                                       "{phone: model.phone}",
                                                       icon="mdi-message-text")],
@@ -1200,18 +1217,43 @@ class YiXiaoYuanElectricity(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "sm": 6},
+                                "props": {"cols": 12, "sm": 8},
                                 "content": [{"component": "VTextField",
                                              "props": {"model": "code",
-                                                       "label": "短信验证码",
-                                                       "placeholder": "6 位数字"}}],
+                                                       "label": "短信验证码（收到后填这里）",
+                                                       "placeholder": "6 位数字",
+                                                       "maxlength": 6,
+                                                       "persistent-hint": True,
+                                                       "hint": "验证码 5 分钟内有效；填完点右边的「登录并绑定寝室」"}}],
                             },
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "sm": 6},
+                                "props": {"cols": 12, "sm": 4},
                                 "content": [self._btn("登录并绑定寝室", "verify",
-                                                      "{phone: model.phone, code: model.code}",
+                                                      "{phone: model.phone, code: String(model.code || '')}",
                                                       icon="mdi-login")],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "sm": 8},
+                                "content": [{"component": "VTextField",
+                                             "props": {"model": "uid",
+                                                       "label": "已经有 UID 的话可以直接填（跳过短信）",
+                                                       "placeholder": "例如 2609237995132109031",
+                                                       "persistent-hint": True,
+                                                       "hint": "UID 就是易校园抓包里的 ymId；填了它就不需要验证码"}}],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "sm": 4},
+                                "content": [self._btn("用 UID 登录", "set_uid",
+                                                      "{uid: String(model.uid || '')}",
+                                                      color="secondary", icon="mdi-key-variant")],
                             },
                         ],
                     },
@@ -1407,6 +1449,8 @@ class YiXiaoYuanElectricity(_PluginBase):
              "auth": "bear", "summary": "发送易校园登录验证码"},
             {"path": "/verify", "endpoint": self.api_verify, "methods": ["POST"],
              "auth": "bear", "summary": "验证码登录并绑定寝室"},
+            {"path": "/set_uid", "endpoint": self.api_set_uid, "methods": ["POST"],
+             "auth": "bear", "summary": "用 UID 直接登录（跳过短信）"},
             {"path": "/test_bot", "endpoint": self.api_test_bot, "methods": ["POST"],
              "auth": "bear", "summary": "测试企业微信机器人长连接"},
             {"path": "/test_query", "endpoint": self.api_test_query, "methods": ["POST"],
@@ -1417,8 +1461,23 @@ class YiXiaoYuanElectricity(_PluginBase):
              "auth": "bear", "summary": "查询插件当前状态"},
         ]
 
-    async def api_send_code(self, payload: dict | None = None) -> dict:
-        data = payload or {}
+    @staticmethod
+    def _payload(payload: Any = None, kwargs: dict | None = None) -> dict:
+        """兼容几种传参方式：JSON body、被包一层的 body、以及 query/kwargs。"""
+        data: dict[str, Any] = {}
+        if isinstance(payload, dict):
+            data.update(payload)
+            nested = data.get("payload")
+            if isinstance(nested, dict):
+                data.update(data.pop("payload"))
+        for key, value in (kwargs or {}).items():
+            if key in ("self", "apikey") or value is None:
+                continue
+            data.setdefault(key, value)
+        return data
+
+    async def api_send_code(self, payload: Any = None, **kwargs) -> dict:
+        data = self._payload(payload, kwargs)
         phone = str(data.get("phone") or self._phone).strip()
         if not phone:
             return {"code": 1, "msg": "请先填手机号"}
@@ -1431,38 +1490,70 @@ class YiXiaoYuanElectricity(_PluginBase):
             logger.warning(f"[易校园电量] 发送验证码失败：{exc}")
             return {"code": 1, "msg": f"发送失败：{exc}"}
         hint = "" if result.get("userExists") is not False else "（该号码可能还没注册易校园）"
-        return {"code": 0, "msg": f"验证码已发送{hint}"}
+        return {"code": 0, "msg": f"验证码已发送到 {phone}{hint}，收到后填到「短信验证码」里再点登录"}
 
-    async def api_verify(self, payload: dict | None = None) -> dict:
-        data = payload or {}
+    def _complete_login(self, user: dict) -> None:
+        """登录成功后统一收尾：换会话、查寝室、落盘。"""
+        self._uid = str(user.get("id") or "")
+        self._school_name = user.get("schoolName") or ""
+        self._school_code = user.get("schoolCode") or ""
+        self._session, _ = oauth_authorize(self._uid)
+        rows = query_bind(self._session)
+        if rows:
+            self._set_room(rows[0])
+        else:
+            self._room = None
+        self._persist()
+        self.update_config(self._current_config())
+
+    async def api_verify(self, payload: Any = None, **kwargs) -> dict:
+        data = self._payload(payload, kwargs)
         phone = str(data.get("phone") or self._phone).strip()
-        code = str(data.get("code") or "").strip()
-        if not phone or not code:
-            return {"code": 1, "msg": "手机号和验证码都要填"}
+        # 验证码优先用本次请求带的，其次用配置里已保存的（页面刷新后还在）
+        code = str(data.get("code") or self._code or "").strip()
+        if not phone:
+            return {"code": 1, "msg": "请先填手机号并点「发送验证码」"}
+        if not code:
+            return {"code": 1, "msg": "请把收到的短信验证码填到「短信验证码」输入框里"}
         try:
             if not self._device_id:
                 self._device_id = gen_device_id()
             user = verify_login(phone, self._device_id, code)
-            self._uid = str(user.get("id") or "")
-            self._school_name = user.get("schoolName") or ""
-            self._school_code = user.get("schoolCode") or ""
-            self._session, _ = oauth_authorize(self._uid)
-            rows = query_bind(self._session)
-            if rows:
-                self._set_room(rows[0])
-            else:
-                self._room = None
-            self._persist()
             self._phone = phone
-            self.update_config({**self._current_config(), "phone": phone})
+            self._complete_login(user)
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[易校园电量] 登录失败：{exc}")
             return {"code": 1, "msg": f"登录失败：{exc}"}
         room = (self._room or {}).get("displayName") or "未绑定寝室"
         return {"code": 0, "msg": f"登录成功：{self._school_name} · {room}\nUID {self._uid}"}
 
-    async def api_test_bot(self, payload: dict | None = None) -> dict:
-        data = payload or {}
+    async def api_set_uid(self, payload: Any = None, **kwargs) -> dict:
+        data = self._payload(payload, kwargs)
+        uid = str(data.get("uid") or self._uid_input or "").strip()
+        if not uid:
+            return {"code": 1, "msg": "请先填 UID"}
+        try:
+            session, info = oauth_authorize(uid)
+            self._uid = uid
+            self._uid_input = uid
+            self._session = session
+            self._school_name = info.get("schoolName") or ""
+            self._school_code = info.get("schoolCode") or ""
+            rows = query_bind(session)
+            if rows:
+                self._set_room(rows[0])
+            else:
+                self._room = None
+            self._persist()
+            self.update_config(self._current_config())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[易校园电量] UID 登录失败：{exc}")
+            return {"code": 1, "msg": f"UID 登录失败：{exc}"}
+        room = (self._room or {}).get("displayName") or "未绑定寝室"
+        return {"code": 0, "msg": f"UID 登录成功：{self._school_name} · {room}"}
+
+    async def api_test_bot(self, payload: Any = None, **kwargs) -> dict:
+        data = self._payload(payload, kwargs)
         bot_id = str(data.get("bot_id") or self._bot_id).strip()
         secret = str(data.get("bot_secret") or self._bot_secret).strip()
         if not bot_id or not secret:
@@ -1494,7 +1585,7 @@ class YiXiaoYuanElectricity(_PluginBase):
             return {"code": 0, "msg": "机器人连接正常（订阅成功）"}
         return {"code": 1, "msg": f"订阅失败 {errcode}：{ack.get('errmsg')}"}
 
-    async def api_test_query(self, payload: dict | None = None) -> dict:
+    async def api_test_query(self, payload: Any = None, **kwargs) -> dict:
         try:
             session = self._ensure_session()
             if not self._room:
@@ -1510,7 +1601,7 @@ class YiXiaoYuanElectricity(_PluginBase):
         except Exception as exc:  # noqa: BLE001
             return {"code": 1, "msg": f"查询失败：{exc}"}
 
-    async def api_test_push(self, payload: dict | None = None) -> dict:
+    async def api_test_push(self, payload: Any = None, **kwargs) -> dict:
         if not self._chatid:
             return {"code": 1, "msg": "还没有群会话 ID：先把机器人拉进群，@ 它发一句「查电量」"}
         if not (self._worker and self._worker.ws):
