@@ -851,9 +851,10 @@ class BotWorker(threading.Thread):
 
     @staticmethod
     def _strip_mentions(text: str) -> str:
+        """去掉 @机器人 前缀；只 @ 不说话时返回空串（交给帮助分支）。"""
         cleaned = (text or "").replace("\u2005", " ").replace("\u00a0", " ")
         kept = [p for p in cleaned.split() if not p.startswith("@")]
-        return " ".join(kept) if kept else cleaned.strip()
+        return " ".join(kept).strip()
 
     def _dispatch_command(self, text: str) -> str:
         plugin = self.plugin
@@ -904,15 +905,29 @@ class BotWorker(threading.Thread):
 
         return plugin._call_with_session(_run)
 
+    def _send_reply_frame(self, req_id: str, body: dict) -> None:
+        """回包必须**原样回填**收到消息里的 req_id。
+
+        `_send_cmd` 会自己生成一个 req_id，那只适合 ping / 订阅这类发起的命令；
+        用在 aibot_respond_msg 上服务端不认识，直接 846605 invalid req_id。
+        """
+        payload = {"cmd": CMD_RESPOND, "headers": {"req_id": req_id}, "body": body}
+        if not self.ws:
+            raise WSClosed("未连接")
+        self.ws.send_text(json.dumps(payload, ensure_ascii=False))
+
     def _open_stream(self, req_id: str) -> str:
-        """收到消息立刻发一帧占位，避免查询慢导致 req_id 过期（846605）。"""
+        """收到消息立刻发一帧占位，避免查询慢导致回复窗口过期。"""
         stream_id = f"stream_{os.urandom(4).hex()}"
         if not req_id:
             return stream_id
         try:
-            self._send_cmd(CMD_RESPOND, {"msgtype": "stream", "stream": {
+            self._send_reply_frame(req_id, {"msgtype": "stream", "stream": {
                 "id": stream_id, "content": "查询中…", "finish": False}})
-            self._wait_ack(req_id, 2.0)
+            ack = self._wait_ack(req_id, 2.0)
+            if ack and ack.get("errcode"):
+                logger.warning(f"[易校园电量] 占位帧被拒：errcode={ack.get('errcode')} "
+                               f"{ack.get('errmsg')}")
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[易校园电量] 发送占位帧失败：{exc}")
         return stream_id
@@ -921,12 +936,14 @@ class BotWorker(threading.Thread):
         """发正文帧（finish=true）。stream_id 由 _open_stream 传入以复用同一个气泡。"""
         stream_id = stream_id or f"stream_{os.urandom(4).hex()}"
         try:
-            self._send_cmd(CMD_RESPOND, {"msgtype": "stream", "stream": {
+            self._send_reply_frame(req_id, {"msgtype": "stream", "stream": {
                 "id": stream_id, "content": text, "finish": True}})
             ack = self._wait_ack(req_id, 3.0)
-            if ack and ack.get("errcode"):
+            if ack is None:
+                logger.warning("[易校园电量] 正文帧没收到 ack（req_id 可能已失效或连接抖动）")
+            elif ack.get("errcode"):
                 logger.warning(f"[易校园电量] 回复被拒：errcode={ack.get('errcode')} "
-                               f"{ack.get('errmsg')}（846605 表示 req_id 已失效，通常是回复太慢）")
+                               f"{ack.get('errmsg')}")
             else:
                 logger.info(f"[易校园电量] 已回复 {len(text)} 字")
         except Exception as exc:  # noqa: BLE001
@@ -994,7 +1011,7 @@ class YiXiaoYuanElectricity(_PluginBase):
     plugin_name = "易校园寝室电量"
     plugin_desc = "查询易校园绑定的寝室电费/电量，@企业微信机器人即可查询，低于阈值自动提醒。"
     plugin_icon = "YiXiaoYuanElectricity.png"
-    plugin_version = "1.0.6"
+    plugin_version = "1.0.7"
     plugin_author = "hahmyy"
     author_url = "https://github.com/hahmyy"
     plugin_config_prefix = "yixiaoyuanelectricity_"
