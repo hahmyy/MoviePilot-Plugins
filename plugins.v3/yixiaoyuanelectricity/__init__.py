@@ -27,7 +27,7 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-from fastapi import Request, Response
+from fastapi import Request
 
 try:  # V3 稳定入口
     from app.sdk.plugin import _PluginBase
@@ -948,7 +948,7 @@ class YiXiaoYuanElectricity(_PluginBase):
     plugin_name = "易校园寝室电量"
     plugin_desc = "查询易校园绑定的寝室电费/电量，@企业微信机器人即可查询，低于阈值自动提醒。"
     plugin_icon = "YiXiaoYuanElectricity.png"
-    plugin_version = "1.0.2"
+    plugin_version = "1.0.3"
     plugin_author = "hahmyy"
     author_url = "https://github.com/hahmyy"
     plugin_config_prefix = "yixiaoyuanelectricity_"
@@ -976,6 +976,7 @@ class YiXiaoYuanElectricity(_PluginBase):
         self._device_id = ""
         self._sec_token = ""
         self._need_captcha = False
+        self._captcha_png_b64 = ""
         self._chatid = ""
         self._room: dict | None = None
         self._school_name = ""
@@ -1023,6 +1024,7 @@ class YiXiaoYuanElectricity(_PluginBase):
         self._school_code = state.get("school_code", "")
         self._low_state = bool(state.get("low", False))
         self._last_alert_ts = float(state.get("last_alert_ts", 0) or 0)
+        self._captcha_png_b64 = state.get("captcha_png") or ""
 
         # 配置页里手填的 UID 优先（跳过短信登录的兜底路径）
         if self._uid_input and self._uid_input != self._uid:
@@ -1102,6 +1104,7 @@ class YiXiaoYuanElectricity(_PluginBase):
             "school_code": self._school_code,
             "low": self._low_state,
             "last_alert_ts": self._last_alert_ts,
+            "captcha_png": self._captcha_png_b64,
         }
         try:
             self.save_data("state", state)
@@ -1171,26 +1174,6 @@ class YiXiaoYuanElectricity(_PluginBase):
                 "color": color,
                 "variant": "flat",
                 "block": block,
-                "prepend-icon": icon,
-                "onclick": js,
-            },
-            "text": label,
-        }
-
-    @staticmethod
-    def _link_btn(label: str, path: str, color: str = "secondary",
-                  icon: str = "mdi-image") -> dict:
-        """生成一个在新标签页打开插件接口的按钮（例如图形验证码图片）。"""
-        js = (
-            "function(e) { "
-            f"window.open('/api/v1/plugin/YiXiaoYuanElectricity/{path}?t=' + Date.now(), '_blank') "
-            "}"
-        )
-        return {
-            "component": "VBtn",
-            "props": {
-                "color": color,
-                "variant": "flat",
                 "prepend-icon": icon,
                 "onclick": js,
             },
@@ -1271,6 +1254,14 @@ class YiXiaoYuanElectricity(_PluginBase):
                     },
                     {
                         "component": "VRow",
+                        "content": [{
+                            "component": "VCol",
+                            "props": {"cols": 12},
+                            "content": self._captcha_image_component(),
+                        }],
+                    },
+                    {
+                        "component": "VRow",
                         "content": [
                             {
                                 "component": "VCol",
@@ -1278,16 +1269,17 @@ class YiXiaoYuanElectricity(_PluginBase):
                                 "content": [{"component": "VTextField",
                                              "props": {"model": "captcha",
                                                        "label": "图形验证码（易校园要求时必填）",
-                                                       "placeholder": "点右边「查看图形验证码」后填这里",
+                                                       "placeholder": "看上方图片，把字符填这里",
                                                        "persistent-hint": True,
                                                        "hint": "短信发太频繁会被风控：提示「需要图形验证码」时，"
-                                                               "先点右边的按钮看图片，把字符填这里，再点发送验证码"}}],
+                                                               "先点右边按钮拉图，关掉配置窗口再打开就能看到图片，"
+                                                               "填好字符再点发送验证码"}}],
                             },
                             {
                                 "component": "VCol",
                                 "props": {"cols": 12, "sm": 4},
-                                "content": [self._link_btn("查看图形验证码", "captcha.png",
-                                                           icon="mdi-image-search")],
+                                "content": [self._btn("获取图形验证码", "captcha", "{}",
+                                                      icon="mdi-image-search")],
                             },
                         ],
                     },
@@ -1526,8 +1518,8 @@ class YiXiaoYuanElectricity(_PluginBase):
         return [
             {"path": "/send_code", "endpoint": self.api_send_code, "methods": ["POST"],
              "auth": "bear", "summary": "发送易校园登录验证码"},
-            {"path": "/captcha.png", "endpoint": self.api_captcha, "methods": ["GET"],
-             "auth": "bear", "summary": "获取易校园图形验证码图片"},
+            {"path": "/captcha", "endpoint": self.api_captcha, "methods": ["POST"],
+             "auth": "bear", "summary": "获取易校园图形验证码"},
             {"path": "/verify", "endpoint": self.api_verify, "methods": ["POST"],
              "auth": "bear", "summary": "验证码登录并绑定寝室"},
             {"path": "/set_uid", "endpoint": self.api_set_uid, "methods": ["POST"],
@@ -1604,8 +1596,12 @@ class YiXiaoYuanElectricity(_PluginBase):
         hint = "" if result.get("userExists") is not False else "（该号码可能还没注册易校园）"
         return {"code": 0, "msg": f"验证码已发送到 {phone}{hint}，收到后填到「短信验证码」里再点登录"}
 
-    async def api_captcha(self) -> Response:
-        """返回易校园图形验证码图片（浏览器新标签页直接打开）。"""
+    async def api_captcha(self, request: Request = None) -> dict:
+        """拉一张图形验证码存起来，并返回 base64（供配置页直接内嵌显示）。
+
+        不走自定义 GET 图片路由：插件 API 里返回原生 Response 在部分宿主版本上
+        注册不成功（表现为 404），所以改成「拉图 -> 存状态 -> 配置页重新打开时内嵌」。
+        """
         try:
             if not self._device_id:
                 self._device_id = gen_device_id()
@@ -1613,13 +1609,40 @@ class YiXiaoYuanElectricity(_PluginBase):
             self._sec_token = info["securityToken"]
             self._need_captcha = info["level"] != 0
             png = get_captcha_png(self._device_id, self._sec_token)
+            self._captcha_png_b64 = base64.b64encode(png).decode("ascii")
             self._persist()
-            return Response(content=png, media_type="image/png",
-                            headers={"Cache-Control": "no-store"})
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[易校园电量] 取图形验证码失败：{exc}")
-            return Response(content=f"获取图形验证码失败：{exc}".encode("utf-8"),
-                            media_type="text/plain; charset=utf-8")
+            return {"code": 1, "msg": f"获取图形验证码失败：{exc}"}
+        return {
+            "code": 0,
+            "msg": "图形验证码已获取。\n配置窗口关掉再重新打开一次，图片会直接显示在「图形验证码」上方；"
+                   "看到图后把字符填进「图形验证码」，再点发送验证码。",
+        }
+
+    def _captcha_image_component(self) -> list[dict]:
+        """把已保存的图形验证码渲染成配置页里的图片（没有就提示先获取）。"""
+        if self._captcha_png_b64:
+            return [{
+                "component": "VImg",
+                "props": {
+                    "src": "data:image/png;base64," + self._captcha_png_b64,
+                    "max-width": 160,
+                    "class": "mb-2 border",
+                    "alt": "易校园图形验证码",
+                },
+            }]
+        return [{
+            "component": "VAlert",
+            "props": {
+                "type": "info",
+                "variant": "tonal",
+                "density": "compact",
+                "class": "mb-2",
+                "text": "需要图形验证码时，先点右边的「获取图形验证码」，"
+                        "然后关掉配置窗口再重新打开，图片会显示在这里。",
+            },
+        }]
 
     def _complete_login(self, user: dict) -> None:
         """登录成功后统一收尾：换会话、查寝室、落盘。"""
