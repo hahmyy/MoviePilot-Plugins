@@ -26,5 +26,18 @@
       "v1.0.0": "V3 版正式版本线：适配 V3 宿主 App 推送，与 V2 版本并行维护。",
       "v0.1.0": "初始版本（V3 内测）：监听 NoticeMessage 事件并转发为极光 JPush v3 系统级推送（鸿蒙/Android/iOS）。"
     }
+  },
+  "YiXiaoYuanElectricity": {
+    "name": "易校园寝室电量",
+    "description": "查询易校园绑定的寝室电费/电量，@企业微信机器人即可查询，低于阈值自动提醒。",
+    "labels": "工具,通知",
+    "version": "1.0.0",
+    "icon": "YiXiaoYuanElectricity.png",
+    "author": "hahmyy",
+    "level": 1,
+    "system_version": ">=3.0.0",
+    "history": {
+      "v1.0.0": "首个版本：手机号+验证码登录易校园，企业微信智能机器人长连接 @ 查询，低余额自动提醒，支持阈值与使用人白名单。"
+    }
   }
 }
