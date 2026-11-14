@@ -9,7 +9,8 @@
 - 推送链路：插件 → 内置中转（地址内置在插件代码中，不对外展示）→ 华为 Push Kit；用户无需配置渠道或服务端凭据。
 - 配置页只保留测试项：`enabled`、`apikey`（测试接口凭据）、`msgtypes`、`testtitle`、`testtext`。
 - 兼容旧配置：`channel` / `token` / `appkey` / `mastersecret` / `appid` / `project_id` /
-  `service_account_json` / `huawei_category` 仍保留在存储中，但不再在设置页展示。
+  `service_account_json` / `huawei_category` 仍保留在存储中，但**一律不再使用**——包括历史
+  配置里写死的 `channel`，所有推送强制走内置中转，不会再拿本地服务账号直连华为。
 
 ## 接口
 
@@ -61,7 +62,7 @@
 - 支持消息类型多选筛选（媒体服务器/订阅/整理入库/资源下载/站点/手动处理/其它/智能体/插件），不选则转发全部。
 - 配置页可自定义测试标题与内容，并用“发送测试（保存后立即发送一条）”开关立即发送；测试接口支持 title/text 查询参数覆盖。
 - 图标：仓库根 `icons/MoviePilotAppPush.png`（V2/V3 共用），索引 `icon` 字段一致。
-- 版本：`package.json` / `package.v2.json` 内 `MoviePilotAppPush` 版本 0.1.19，与插件类 `plugin_version` 一致。
+- 版本：`package.json` / `package.v2.json` 内 `MoviePilotAppPush` 版本 0.1.20，与插件类 `plugin_version` 一致。
 
 ## 内置中转（当前默认）
 
@@ -72,24 +73,19 @@
   并调用 v3 接口。
 - 设置页不再展示渠道与凭据字段；`install_id` 在配置页与详情页可见，设备由 App 绑定。
 
-## 旧直连渠道（仅兼容旧配置）
+## 历史渠道（已停用）
 
-- `channel` 选 `huawei` 时，`token` 字段填华为 Push Token（不再是极光 Alias）。
-- 需配置 `project_id`（AGC 项目 ID）和 `service_account_json`（AGC 服务账号 JSON，含 key_id /
-  sub_account / private_key）；`appid` 为 Client ID，v3 接口不直接使用，仅作备用记录。
-- 服务端按华为官方文档生成 PS256 服务账号 JWT，优先换取 access_token（
-  grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer），换取不可用时回退官方支持的
-  JWT 直连方式；调用 `POST /v3/{projectId}/messages:send`，Header `push-type: 0`，
-  请求体为 `payload.notification{category,title,body}` + `target.token` + `pushOptions`。
-- 安全：服务账号 JSON 只存服务端插件数据，配置页不回显；日志、页面、仪表盘与 /run
-  响应都不会出现 private_key。
+- 早期版本支持 `channel=jpush`（极光）与 `channel=huawei`（服务账号直连华为）。
+- **现已全部停用**：初始化时忽略配置里的 `channel`，固定为内置中转。老站点升级后无需改配置，
+  也不会再因为本地服务账号过期、算法不匹配而报 `80200001` 之类的认证错误。
+- 旧的 `token` / `appkey` / `mastersecret` / `project_id` / `service_account_json` 只是留在
+  存储里不再读取；确认无需回滚后可在配置页重新保存一次，插件会把这些字段清成当前值。
 
 ## 配置页排版与 JSON 上传
 
-- 推送渠道切换后只显示当前渠道需要的输入框：极光字段用 `v-show` 控制为 `channel !== 'huawei'`，
-  华为字段控制为 `channel === 'huawei'`，避免所有渠道字段挤在同一版面。
-- 华为服务账号支持两种输入方式：直接粘贴 JSON 到文本框，或用文件选择框上传 `.json`；
-  上传由前端读取文件内容写入 JSON 文本字段，服务端保存时再解析识别，表单 model 不保存 File 对象。
+- 配置页只渲染测试相关字段（`enabled` / `apikey` / `msgtypes` / `testtitle` / `testtext`），
+  渠道、Token、AppKey、项目 ID、服务账号 JSON 等字段仍保留在 model 中但不再出现在界面上。
+- 因此旧的「上传服务账号 JSON」入口在界面上已经没有了；如需更换中转凭据，属于网关侧的运维动作。
 
 ## 推送 extras 字段契约（点击通知展示详情）
 

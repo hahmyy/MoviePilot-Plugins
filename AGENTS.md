@@ -55,5 +55,8 @@ MoviePilot 宿主代码和测试为准；V2 兼容实现以 V2 宿主 SDK 与官
   `project_id`、`service_account_json`、`huawei_category`、`msgtypes`、`testtitle`、`testtext`、`onlyonce`。
 - 配置页只渲染测试项（`enabled`、`apikey`、`msgtypes`、`testtitle`、`testtext`）；渠道与凭据字段
   保留在存储中以兼容旧配置，但不得再出现在表单里。推送统一走内置中转，**更新日志、README、设置页文案一律不得出现中转域名**。
+- **`channel` 一律忽略**：`init_plugin` 里固定为 `gateway`，不得再按配置值分流到 jpush/huawei。
+  历史直连代码可保留为死方法（测试直接调用），但主流程不得进入；否则老站点会继续拿本地
+  服务账号直连华为，出现 `80200001` 认证错误。
 - 任何影响以上 ID、接口路径/参数/响应或配置字段的变更，必须先同步通知 App 侧（mp-v2），
   并在本文件与插件 README 中同步更新契约说明。

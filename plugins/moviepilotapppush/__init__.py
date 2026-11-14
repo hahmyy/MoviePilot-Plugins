@@ -504,7 +504,7 @@ class MoviePilotAppPush(_PluginBase):
     # 插件图标
     plugin_icon = "MoviePilotAppPush.png"
     # 插件版本
-    plugin_version = "0.1.19"
+    plugin_version = "0.1.20"
     # 插件作者
     plugin_author = "hahmyy"
     # 作者主页
@@ -555,9 +555,9 @@ class MoviePilotAppPush(_PluginBase):
         self._onlyonce = bool(config.get("onlyonce"))
         self._test_title = str(config.get("testtitle") or "").strip()
         self._test_text = str(config.get("testtext") or "").strip()
-        self._channel = str(config.get("channel") or "jpush").strip().lower()
-        if self._channel not in ("gateway", "jpush", "huawei"):
-            self._channel = "gateway"
+        # 所有推送统一走内置中转：忽略历史配置里的 channel（旧值 jpush/huawei 不再直连），
+        # 否则老站点会继续拿本地服务账号直连华为，出现 80200001 之类的认证错误。
+        self._channel = "gateway"
         self._appid = str(config.get("appid") or "").strip()
         self._project_id = str(config.get("project_id") or "").strip()
         self._hw_category = str(config.get("huawei_category") or "MARKETING").strip() or "MARKETING"
