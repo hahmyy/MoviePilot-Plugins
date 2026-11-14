@@ -3,10 +3,13 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import secrets
 import time
 from datetime import datetime
 from enum import Enum
 from typing import Any
+
+from fastapi import Request
 
 try:
     from cryptography.hazmat.primitives import hashes, serialization
@@ -84,6 +87,94 @@ def _append_history(history: Any, entry: dict, limit: int = 20) -> list:
     items = [item for item in history if isinstance(item, dict)] if isinstance(history, list) else []
     items.insert(0, entry)
     return items[:limit]
+
+
+INSTALL_IDENTITY_KEY = "install_identity"
+BOUND_DEVICES_KEY = "bound_devices"
+MAX_BOUND_DEVICES = 20
+
+
+def _new_install_identity() -> dict:
+    """生成站点级安装标识。
+
+    install_id 用于页面展示与中转路由，install_secret 供后续中转鉴权预留，
+    不在页面或接口响应中明文出现。
+    """
+    return {
+        "install_id": "mp_{}".format(secrets.token_hex(4)),
+        "install_secret": secrets.token_urlsafe(24),
+        "created_at": _now_str(),
+    }
+
+
+def _coerce_bool(value: Any, default: bool = True) -> bool:
+    """把配置/接口里的布尔值统一成 bool，缺省按 default。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("1", "true", "yes", "on"):
+            return True
+        if text in ("0", "false", "no", "off"):
+            return False
+    return default
+
+
+def _device_status_text(device: dict) -> str:
+    """设备状态的中文描述，页面与接口共用。"""
+    status = _coerce_str(device.get("status")) or "active"
+    if status == "invalid":
+        return "已失效"
+    if not _coerce_bool(device.get("notify_enabled"), True):
+        return "通知已关闭"
+    return "通知已开启"
+
+
+def _device_public(device: dict) -> dict:
+    """设备对外视图：Push Token 必须脱敏，不返回原始值。"""
+    if not isinstance(device, dict):
+        return {}
+    return {
+        "device_id": _coerce_str(device.get("device_id")),
+        "name": _coerce_str(device.get("name")) or "未命名设备",
+        "user_name": _coerce_str(device.get("user_name"))
+        or _coerce_str(device.get("user_id"))
+        or "-",
+        "masked_token": _mask_token(device.get("push_token")),
+        "status": _coerce_str(device.get("status")) or "active",
+        "status_text": _device_status_text(device),
+        "notify_enabled": _coerce_bool(device.get("notify_enabled"), True),
+        "created_at": _coerce_str(device.get("created_at")),
+        "last_push_at": _coerce_str(device.get("last_push_at")),
+        "last_message": _coerce_str(device.get("last_message")),
+        "last_ok": device.get("last_ok"),
+    }
+
+
+def _token_claims(request: Any) -> dict:
+    """从 Bearer 令牌读取用户声明。
+
+    宿主已通过 auth=bear 完成验签，这里只做 payload 解码取 sub/username，
+    不重复校验签名，也不信任请求体里的用户字段。
+    """
+    try:
+        header = request.headers.get("authorization") or ""
+        if not header.lower().startswith("bearer "):
+            return {}
+        parts = header[7:].strip().split(".")
+        if len(parts) < 2:
+            return {}
+        payload = parts[1] + "=" * (-len(parts[1]) % 4)
+        data = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")).decode("utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _is_token_invalid(message: str) -> bool:
+    """判断失败信息是否表示 Push Token 已失效（华为 80300007）。"""
+    text = _coerce_str(message)
+    return "80300007" in text or "全部无效" in text or "都无效" in text
 
 
 def _event_data_to_dict(data: Any) -> dict:
@@ -385,7 +476,7 @@ class MoviePilotAppPush(_PluginBase):
     plugin_name = "App 推送"
     plugin_desc = "将 MoviePilot 通知推送到鸿蒙/Android/iOS 客户端（系统级推送）。"
     plugin_icon = "MoviePilotAppPush.png"
-    plugin_version = "1.0.14"
+    plugin_version = "1.0.15"
     plugin_author = "hahmyy"
     author_url = "https://github.com/hahmyy"
     plugin_config_prefix = "moviepilotapppush_"
@@ -414,6 +505,7 @@ class MoviePilotAppPush(_PluginBase):
     _hw_token_mode = ""
     _hw_token_key = ""
     _hw_token_expire_at = 0.0
+    _install_id = ""
 
     # ------------------------------------------------------------------ #
     # 生命周期
@@ -453,6 +545,7 @@ class MoviePilotAppPush(_PluginBase):
         self._hw_token_mode = ""
         self._hw_token_key = ""
         self._hw_token_expire_at = 0.0
+        self._ensure_install_identity()
         if sanitize_account:
             try:
                 self.update_config(self._current_config())
@@ -521,6 +614,7 @@ class MoviePilotAppPush(_PluginBase):
 
     def get_form(self) -> tuple[list[dict], dict[str, Any]]:
         """配置页：按推送渠道即时显示对应字段。"""
+        bound = len(self._load_devices())
         head = [
             {
                 "component": "VAlert",
@@ -529,7 +623,11 @@ class MoviePilotAppPush(_PluginBase):
                     "variant": "tonal",
                     "density": "compact",
                     "class": "mb-2",
-                    "text": "切换推送渠道后会立即显示对应字段：极光填 AppKey / Master Secret，华为填项目 ID 与服务账号 JSON。",
+                    "text": (
+                        "切换推送渠道后会立即显示对应字段：极光填 AppKey / Master Secret，"
+                        "华为填项目 ID 与服务账号 JSON。设备在 App「设置 → 通知」开启后自动绑定，"
+                        "当前已绑定 {} 台（安装 ID：{}）。"
+                    ).format(bound, self._install_id or "-"),
                 },
             },
             {"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件"}},
@@ -672,12 +770,95 @@ class MoviePilotAppPush(_PluginBase):
         }
 
     def get_page(self) -> list[dict]:
-        """插件详情页：一键测试、成功率/失败率环形仪表与最近消息。"""
+        """插件详情页：设备绑定、一键测试、成功率/失败率环形仪表与最近消息。"""
         return (
-            self._build_last_test_card()
+            self._build_device_card()
+            + self._build_last_test_card()
             + [self._build_test_action_card()]
             + self._build_dashboard_elements()
         )
+
+    def _build_device_card(self) -> list[dict]:
+        """详情页设备卡片：展示哪几台设备会收到通知，并提供删除入口。"""
+        devices = self._load_devices()
+        enabled = len([item for item in devices if _device_status_text(item) == "通知已开启"])
+        rows = []
+        for device in devices:
+            line = "{} · {} · {} · 最近：{}".format(
+                _truncate(device.get("name"), 16) or "未命名设备",
+                _coerce_str(device.get("user_name")) or "-",
+                _device_status_text(device),
+                _coerce_str(device.get("last_push_at")) or "尚未推送",
+            )
+            rows.append(
+                {
+                    "component": "div",
+                    "props": {"class": "d-flex align-center justify-space-between py-1"},
+                    "content": [
+                        {
+                            "component": "div",
+                            "props": {"class": "text-body-2"},
+                            "text": line,
+                        },
+                        {
+                            "component": "VBtn",
+                            "props": {
+                                "size": "small",
+                                "color": "error",
+                                "variant": "text",
+                                "prepend-icon": "mdi-delete",
+                            },
+                            "text": "删除",
+                            "events": {
+                                "click": {
+                                    "api": "/plugin/MoviePilotAppPush/device/remove",
+                                    "method": "GET",
+                                    "params": {
+                                        "device_id": _coerce_str(device.get("device_id"))
+                                    },
+                                }
+                            },
+                        },
+                    ],
+                }
+            )
+        if not rows:
+            rows.append(
+                {
+                    "component": "div",
+                    "props": {"class": "text-body-2 text-medium-emphasis py-2"},
+                    "text": "暂无绑定设备：打开 App → 我的 → 设置 → 通知，开启后本机会出现在这里。",
+                }
+            )
+        return [
+            {
+                "component": "VCard",
+                "props": {"variant": "tonal", "class": "mt-2"},
+                "content": [
+                    {
+                        "component": "VCardTitle",
+                        "props": {"class": "text-subtitle-1 font-weight-bold pb-1"},
+                        "text": "已绑定设备（{} 台，通知开启 {} 台）".format(
+                            len(devices), enabled
+                        ),
+                    },
+                    {
+                        "component": "VCardText",
+                        "props": {"class": "py-2"},
+                        "content": [
+                            {
+                                "component": "div",
+                                "props": {
+                                    "class": "text-caption text-medium-emphasis mb-2"
+                                },
+                                "text": "安装 ID：{}".format(self._install_id or "-"),
+                            }
+                        ]
+                        + rows,
+                    },
+                ],
+            }
+        ]
 
     def _build_test_action_card(self) -> dict:
         """详情页一键测试卡片：直接调用固定 /run 接口，无需先保存。"""
@@ -1068,9 +1249,45 @@ class MoviePilotAppPush(_PluginBase):
                 "summary": "发送一条测试推送",
                 "description": (
                     "App 配置页「测试」按钮调用。校验 apikey 后，"
-                    "向配置的 token(Alias) 推送一条测试通知。"
+                    "向已绑定设备（或兼容的单一 Token）推送一条测试通知。"
                 ),
-            }
+            },
+            {
+                "path": "/device/bind",
+                "endpoint": self.device_bind,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "绑定一台设备",
+                "description": "App 开启通知后调用，登记 device_id、华为 Push Token 与设备名。",
+            },
+            {
+                "path": "/device/unbind",
+                "endpoint": self.device_unbind,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "解除设备绑定",
+            },
+            {
+                "path": "/device/notify",
+                "endpoint": self.device_notify,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "开关单台设备的通知",
+            },
+            {
+                "path": "/device/list",
+                "endpoint": self.device_list,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "已绑定设备列表",
+            },
+            {
+                "path": "/device/remove",
+                "endpoint": self.device_remove,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "删除绑定设备（插件详情页按钮调用）",
+            },
         ]
 
     async def run(
@@ -1090,11 +1307,82 @@ class MoviePilotAppPush(_PluginBase):
             logger.error(f"MoviePilotAppPush 测试结果记录异常: {type(exc).__name__}")
         return result
 
+    # ------------------------------------------------------------------ #
+    # 设备绑定接口（App 设置页 / 插件详情页调用）
+    # ------------------------------------------------------------------ #
+    async def device_bind(self, request: Request) -> dict:
+        """绑定设备：用户身份取自宿主已验签的 Bearer 令牌，不信任请求体。"""
+        try:
+            payload = await request.json()
+        except Exception:  # noqa: BLE001
+            return {"code": 1, "msg": "请求体不是合法 JSON"}
+        if not isinstance(payload, dict):
+            return {"code": 1, "msg": "请求体格式不正确"}
+        claims = _token_claims(request)
+        user_id = _coerce_str(claims.get("sub"))
+        user_name = _coerce_str(claims.get("username")) or user_id
+        try:
+            return self._bind_device(payload, user_id, user_name)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"MoviePilotAppPush 绑定设备异常: {type(exc).__name__}")
+            return {"code": 1, "msg": "绑定失败，请查看服务端日志"}
+
+    async def device_unbind(self, request: Request) -> dict:
+        """解除绑定：只删除本机 device_id 对应的记录。"""
+        try:
+            payload = await request.json()
+        except Exception:  # noqa: BLE001
+            return {"code": 1, "msg": "请求体不是合法 JSON"}
+        if not isinstance(payload, dict):
+            return {"code": 1, "msg": "请求体格式不正确"}
+        try:
+            return self._remove_device(_coerce_str(payload.get("device_id")))
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"MoviePilotAppPush 解绑设备异常: {type(exc).__name__}")
+            return {"code": 1, "msg": "解绑失败，请查看服务端日志"}
+
+    async def device_notify(self, request: Request) -> dict:
+        """开关单台设备的通知，供 App 设置页同步。"""
+        try:
+            payload = await request.json()
+        except Exception:  # noqa: BLE001
+            return {"code": 1, "msg": "请求体不是合法 JSON"}
+        if not isinstance(payload, dict):
+            return {"code": 1, "msg": "请求体格式不正确"}
+        try:
+            return self._set_device_notify(
+                _coerce_str(payload.get("device_id")),
+                _coerce_bool(payload.get("notify_enabled"), True),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"MoviePilotAppPush 更新通知开关异常: {type(exc).__name__}")
+            return {"code": 1, "msg": "更新失败，请查看服务端日志"}
+
+    async def device_list(self) -> dict:
+        """返回已绑定设备（Push Token 脱敏）。"""
+        devices = self._load_devices()
+        return {
+            "code": 0,
+            "msg": "",
+            "data": {
+                "install_id": self._install_id,
+                "devices": [_device_public(device) for device in devices],
+            },
+        }
+
+    async def device_remove(self, device_id: str = "") -> dict:
+        """详情页删除按钮：走 GET 查询参数，便于页面直接绑定点击事件。"""
+        try:
+            return self._remove_device(device_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"MoviePilotAppPush 删除设备异常: {type(exc).__name__}")
+            return {"code": 1, "msg": "删除失败，请查看服务端日志"}
+
     def _channel_ready(self) -> tuple[bool, str]:
         """检查当前渠道的最小可用配置。"""
         if self._channel == "huawei":
-            if not self._token:
-                return False, "未配置华为 Push Token"
+            if not self._has_target():
+                return False, "未绑定设备，且未配置华为 Push Token"
             account = self._hw_service_account
             project_id = self._project_id or (
                 _coerce_str(account.get("project_id")) if isinstance(account, dict) else ""
@@ -1104,8 +1392,8 @@ class MoviePilotAppPush(_PluginBase):
             if not isinstance(account, dict):
                 return False, "未配置华为服务账号 JSON"
             return True, ""
-        if not self._token:
-            return False, "未配置 App Push Token"
+        if not self._has_target():
+            return False, "未绑定设备，且未配置 App Push Token"
         if not self._appkey or not self._mastersecret:
             return False, "未配置 JPush 服务端凭据"
         return True, ""
@@ -1148,6 +1436,151 @@ class MoviePilotAppPush(_PluginBase):
             self.save_data("huawei_service_account", account)
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"MoviePilotAppPush 保存华为服务账号失败: {exc}")
+
+    # ------------------------------------------------------------------ #
+    # 站点标识与绑定设备
+    # ------------------------------------------------------------------ #
+    def _ensure_install_identity(self) -> None:
+        """首次启用时生成安装标识；之后每次加载沿用同一份。"""
+        identity = self._read_data(INSTALL_IDENTITY_KEY)
+        if isinstance(identity, dict) and _coerce_str(identity.get("install_id")):
+            self._install_id = _coerce_str(identity.get("install_id"))
+            return
+        identity = _new_install_identity()
+        self._install_id = identity["install_id"]
+        try:
+            self.save_data(INSTALL_IDENTITY_KEY, identity)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"MoviePilotAppPush 保存安装标识失败: {exc}")
+
+    def _load_devices(self) -> list:
+        """读取绑定设备；脏数据直接忽略，不影响推送。"""
+        stored = self._read_data(BOUND_DEVICES_KEY)
+        if not isinstance(stored, list):
+            return []
+        return [
+            item
+            for item in stored
+            if isinstance(item, dict) and _coerce_str(item.get("device_id"))
+        ]
+
+    def _save_devices(self, devices: list) -> None:
+        try:
+            self.save_data(BOUND_DEVICES_KEY, devices[:MAX_BOUND_DEVICES])
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"MoviePilotAppPush 保存绑定设备失败: {exc}")
+
+    def _active_devices(self) -> list:
+        """参与推送的设备：状态正常且通知开关为开。"""
+        return [
+            device
+            for device in self._load_devices()
+            if (_coerce_str(device.get("status")) or "active") == "active"
+            and _coerce_bool(device.get("notify_enabled"), True)
+        ]
+
+    def _has_target(self) -> bool:
+        """是否至少有一个可推送目标（绑定设备或兼容的单一 Token）。"""
+        return bool(self._active_devices()) or bool(self._token)
+
+    def _bind_device(self, payload: dict, user_id: str, user_name: str) -> dict:
+        """新增或更新一台绑定设备；同一 device_id 重复绑定只刷新信息。"""
+        if not self._enabled:
+            return {"code": 1, "msg": "插件未启用"}
+        device_id = _coerce_str(payload.get("device_id"))
+        push_token = _coerce_str(payload.get("push_token"))
+        if not device_id or len(device_id) > 64:
+            return {"code": 1, "msg": "device_id 缺失或过长"}
+        if len(push_token) < 8 or len(push_token) > 2048:
+            return {"code": 1, "msg": "Push Token 缺失或格式不正确"}
+
+        devices = self._load_devices()
+        record = None
+        for item in devices:
+            if _coerce_str(item.get("device_id")) == device_id:
+                record = item
+                break
+        if record is None:
+            if len(devices) >= MAX_BOUND_DEVICES:
+                return {"code": 1, "msg": "绑定设备已达上限（{} 台）".format(MAX_BOUND_DEVICES)}
+            record = {"device_id": device_id, "created_at": _now_str()}
+            devices.append(record)
+
+        now = _now_str()
+        record.update(
+            {
+                "push_token": push_token,
+                "name": _truncate(payload.get("device_name"), 40) or "未命名设备",
+                "user_id": user_id,
+                "user_name": user_name,
+                "notify_enabled": _coerce_bool(payload.get("notify_enabled"), True),
+                "status": "active",
+                "updated_at": now,
+            }
+        )
+        record.pop("invalid_at", None)
+        self._save_devices(devices)
+        logger.info(
+            "MoviePilotAppPush 设备已绑定: {}（{}）".format(
+                record.get("name"), device_id[:8]
+            )
+        )
+        return {
+            "code": 0,
+            "msg": "已绑定",
+            "data": {
+                "device_id": device_id,
+                "install_id": self._install_id,
+                "user_name": user_name,
+                "notify_enabled": record.get("notify_enabled"),
+            },
+        }
+
+    def _remove_device(self, device_id: str) -> dict:
+        """删除绑定设备：之后不再向该设备推送。"""
+        target = _coerce_str(device_id)
+        if not target:
+            return {"code": 1, "msg": "缺少 device_id"}
+        devices = self._load_devices()
+        remain = [item for item in devices if _coerce_str(item.get("device_id")) != target]
+        if len(remain) == len(devices):
+            return {"code": 1, "msg": "设备不存在"}
+        self._save_devices(remain)
+        logger.info("MoviePilotAppPush 设备已删除: {}".format(target[:8]))
+        return {"code": 0, "msg": "已删除"}
+
+    def _set_device_notify(self, device_id: str, enabled: bool) -> dict:
+        """开关单台设备的通知，不删除绑定关系。"""
+        target = _coerce_str(device_id)
+        if not target:
+            return {"code": 1, "msg": "缺少 device_id"}
+        devices = self._load_devices()
+        for device in devices:
+            if _coerce_str(device.get("device_id")) != target:
+                continue
+            device["notify_enabled"] = bool(enabled)
+            device["updated_at"] = _now_str()
+            if enabled and _coerce_str(device.get("status")) == "invalid":
+                device["status"] = "active"
+            self._save_devices(devices)
+            return {"code": 0, "msg": "已开启" if enabled else "已关闭"}
+        return {"code": 1, "msg": "设备不存在，请重新绑定"}
+
+    def _update_device_result(self, device: dict, ok: bool, message: str) -> None:
+        """回写单台设备的最近一次投递结果；连续失败或 Token 失效时标记不可用。"""
+        now = _now_str()
+        device["last_push_at"] = now
+        device["last_ok"] = ok
+        device["last_message"] = _truncate(message, 120)
+        if ok:
+            device["fail_count"] = 0
+            device["last_ok_at"] = now
+            return
+        count = int(device.get("fail_count") or 0) + 1
+        device["fail_count"] = count
+        if _is_token_invalid(message) or count >= 5:
+            device["status"] = "invalid"
+            device["invalid_at"] = now
 
     def _load_stats(self) -> dict:
         data = _default_stats()
@@ -1211,7 +1644,7 @@ class MoviePilotAppPush(_PluginBase):
     # ------------------------------------------------------------------ #
     @eventmanager.register(EventType.NoticeMessage)
     async def _on_notice(self, event: Event) -> None:
-        if not self._enabled or not self._token:
+        if not self._enabled or not self._has_target():
             return
         data = _event_data_to_dict(event.event_data)
         title = _coerce_str(data.get("title"))
@@ -1237,14 +1670,51 @@ class MoviePilotAppPush(_PluginBase):
     async def _push(
         self, title: str, text: str, extras: dict | None = None
     ) -> tuple[bool, str]:
-        """按配置渠道分发推送。"""
-        if self._channel == "huawei":
-            return await self._push_huawei(title, text, extras)
-        return await self._push_jpush(title, text, extras)
+        """按绑定设备分发推送；没有绑定设备时回退到单一 Token（兼容旧配置）。"""
+        devices = self._active_devices()
+        if not devices:
+            if not self._token:
+                return False, "没有可推送的设备：请在 App 设置中开启通知，或配置 Push Token"
+            return await self._push_target(self._token, title, text, extras)
 
-    async def _push_huawei(self, title: str, text: str, extras: dict | None = None) -> tuple[bool, str]:
+        success = 0
+        details = []
+        for device in devices:
+            token = _coerce_str(device.get("push_token"))
+            if not token:
+                continue
+            ok, message = await self._push_target(token, title, text, extras)
+            self._update_device_result(device, ok, message)
+            if ok:
+                success += 1
+            details.append(
+                "{}：{}".format(
+                    _truncate(device.get("name"), 12) or "设备",
+                    "成功" if ok else _truncate(message, 40),
+                )
+            )
+        await self._write_data(BOUND_DEVICES_KEY, devices)
+        summary = "；".join(details)
+        if success > 0:
+            return True, "{}/{} 台成功（{}）".format(success, len(devices), summary)
+        return False, "全部失败（{}）".format(summary)
+
+    async def _push_target(
+        self, target: str, title: str, text: str, extras: dict | None = None
+    ) -> tuple[bool, str]:
+        """按渠道向单个目标（华为 Push Token 或极光 Alias）投递。"""
+        if not _coerce_str(target):
+            return False, "推送目标为空"
+        if self._channel == "huawei":
+            return await self._push_huawei(title, text, extras, target=target)
+        return await self._push_jpush(title, text, extras, alias=target)
+
+    async def _push_huawei(
+        self, title: str, text: str, extras: dict | None = None, target: str | None = None
+    ) -> tuple[bool, str]:
         """华为 Push Kit v3 直连推送。"""
-        if not self._token:
+        push_token = _coerce_str(target) or self._token
+        if not push_token:
             return False, "未配置华为 Push Token"
         account = self._hw_service_account
         project_id = self._project_id or (
@@ -1265,7 +1735,7 @@ class MoviePilotAppPush(_PluginBase):
             _truncate(title, MAX_EXTRAS_TITLE_LENGTH) or title,
             _truncate(text, MAX_HUAWEI_BODY_LENGTH) or text,
             self._hw_category,
-            self._token,
+            push_token,
             extras,
         )
         headers = {
@@ -1354,11 +1824,15 @@ class MoviePilotAppPush(_PluginBase):
         return access_token, body.get("expires_in") or 3300
 
     async def _push_jpush(
-        self, title: str, text: str, extras: dict | None = None
+        self, title: str, text: str, extras: dict | None = None, alias: str | None = None
     ) -> tuple[bool, str]:
         if not self._appkey or not self._mastersecret:
             logger.warning("MoviePilotAppPush: 未配置 JPush AppKey / Master Secret")
             return False, "未配置 JPush 服务端凭据"
+
+        audience_alias = _coerce_str(alias) or self._token
+        if not audience_alias:
+            return False, "未配置 App Push Token"
 
         credentials = base64.b64encode(
             f"{self._appkey}:{self._mastersecret}".encode("utf-8")
@@ -1366,7 +1840,7 @@ class MoviePilotAppPush(_PluginBase):
         headers = {"Authorization": f"Basic {credentials}"}
         payload = {
             "platform": ["android", "ios", "hmos"],
-            "audience": {"alias": [self._token]},
+            "audience": {"alias": [audience_alias]},
             "notification": _compose_notification(title, text, extras or {}),
             # apns_production 仅影响 iOS；鸿蒙/Android 走厂商通道不受影响。
             "options": {"apns_production": True},

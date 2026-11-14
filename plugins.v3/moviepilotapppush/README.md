@@ -8,7 +8,7 @@
 - 配置项：
   - `enabled`：是否启用
   - `apikey`：Push Key（App 调测试接口时的凭据）
-  - `token`：App Push Token（即极光 Alias，推送目标）
+  - `token`：兼容的单一推送目标（极光 Alias / 华为 Push Token）；已绑定设备优先
   - `appkey`：极光 AppKey（服务端鉴权用户名）
   - `mastersecret`：极光 Master Secret（服务端鉴权密码，仅服务端保存）
 
@@ -17,6 +17,23 @@
 - `GET /api/v1/plugin/MoviePilotAppPush/run?apikey=<PushKey>`
   - 需携带登录态（`auth: "bear"`），校验 apikey 后向配置的 token 发送一条测试通知。
   - 响应：`{"code": 0, "msg": "..."}`；失败 `code` 非 0。
+- `POST /api/v1/plugin/MoviePilotAppPush/device/bind`（`auth: "bear"`）
+  - App 开启通知后登记设备：`device_id` / `push_token` / `device_name` / `notify_enabled`。
+  - 用户身份取自宿主已验签的 Bearer 令牌，不读取请求体里的用户字段。
+- `POST /api/v1/plugin/MoviePilotAppPush/device/notify`：开关单台设备的通知。
+- `POST /api/v1/plugin/MoviePilotAppPush/device/unbind`：解除绑定。
+- `GET /api/v1/plugin/MoviePilotAppPush/device/remove?device_id=...`：插件详情页删除按钮调用。
+- `GET /api/v1/plugin/MoviePilotAppPush/device/list`：已绑定设备列表（Push Token 脱敏）。
+
+## 设备绑定
+
+- 首次启用时生成安装标识 `install_id`（如 `mp_1a2b3c4d`），页面展示，用于区分站点。
+- App 在「设置 → 通知」开启后调用 `device/bind`，按 `device_id` 登记设备；同一设备重复绑定
+  只刷新 Push Token 与设备名，不会重复占位（上限 20 台）。
+- 推送逐个投递到“已绑定且通知开启”的设备；没有绑定设备时回退到配置里的 `token`，
+  老配置不受影响。
+- 华为返回 `80300007`（Token 全部无效）或连续失败 5 次时，该设备标记为「已失效」，不再投递。
+- 详情页展示设备名、用户、状态与最近推送时间，可逐台删除。
 
 ## 事件
 

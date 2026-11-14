@@ -6,6 +6,7 @@ plugins/），与上游 CI 对经典兼容插件的回归方式一致。
 """
 from __future__ import annotations
 
+import asyncio
 import ast
 import importlib
 import json
@@ -39,8 +40,8 @@ def test_manifest_and_plugin_are_v2_aligned() -> None:
         if isinstance(node, ast.ImportFrom)
     }
 
-    assert manifest["version"] == "0.1.14"
-    assert 'plugin_version = "0.1.14"' in source
+    assert manifest["version"] == "0.1.15"
+    assert 'plugin_version = "0.1.15"' in source
     assert manifest["icon"] == "MoviePilotAppPush.png"
     assert (ROOT / "icons" / manifest["icon"]).is_file()
     assert "app.core.event" in imports
@@ -143,9 +144,11 @@ def test_api_path_is_prefixed_with_plugin_id() -> None:
     apis = PluginProjection({plugin.__class__.__name__: plugin}).apis(
         plugin.__class__.__name__
     )
-    assert len(apis) == 1
-    assert apis[0]["path"] == "/MoviePilotAppPush/run"
-    assert apis[0]["auth"] == "bear"
+    paths = [api["path"] for api in apis]
+    assert "/MoviePilotAppPush/run" in paths
+    assert "/MoviePilotAppPush/device/bind" in paths
+    run_api = next(api for api in apis if api["path"] == "/MoviePilotAppPush/run")
+    assert run_api["auth"] == "bear"
 
 
 def test_stop_service_is_idempotent() -> None:
@@ -164,7 +167,7 @@ def test_v2_layouts_stay_identical() -> None:
 
     package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))["MoviePilotAppPush"]
     versioned_package = json.loads((ROOT / "package.v2.json").read_text(encoding="utf-8"))["MoviePilotAppPush"]
-    assert package["version"] == versioned_package["version"] == "0.1.14"
+    assert package["version"] == versioned_package["version"] == "0.1.15"
     assert package["icon"] == versioned_package["icon"] == "MoviePilotAppPush.png"
 
 
@@ -758,3 +761,67 @@ def test_page_test_button_hidden_when_not_ready() -> None:
     nodes = list(_flatten_page(plugin.get_page()))
     assert not [n for n in nodes if n.get("component") == "VBtn" and n.get("events")]
     assert any("请先在配置页保存" in json.dumps(n, ensure_ascii=False) for n in nodes)
+
+
+def _stub_storage(plugin):
+    """把插件数据层换成内存字典，避免测试依赖宿主数据库。"""
+    store: dict = {}
+    plugin._read_data = lambda key: store.get(key)
+    plugin.save_data = lambda key, value: store.__setitem__(key, value)
+    return store
+
+
+def test_device_bind_list_and_remove() -> None:
+    """绑定后列表只返回脱敏 Token，删除后不再保留记录。"""
+    module = _load_plugin()
+    plugin = _new_instance(module, {"enabled": True, "channel": "huawei"})
+    _stub_storage(plugin)
+
+    bound = plugin._bind_device(
+        {
+            "device_id": "dev-1",
+            "push_token": "abcdefghijklmnop",
+            "device_name": "Pura 70",
+            "notify_enabled": True,
+        },
+        "1",
+        "hahmyy",
+    )
+    assert bound["code"] == 0
+    assert bound["data"]["install_id"] == plugin._install_id
+
+    listed = asyncio.run(plugin.device_list())
+    devices = listed["data"]["devices"]
+    assert len(devices) == 1
+    assert devices[0]["name"] == "Pura 70"
+    assert devices[0]["status_text"] == "通知已开启"
+    assert devices[0]["masked_token"] != "abcdefghijklmnop"
+    assert "abcdefghijklmnop" not in json.dumps(listed, ensure_ascii=False)
+
+    assert plugin._remove_device("dev-1")["code"] == 0
+    assert plugin._load_devices() == []
+
+
+def test_push_fans_out_to_enabled_devices() -> None:
+    """有绑定设备时逐个投递，通知关闭的设备被跳过。"""
+    module = _load_plugin()
+    plugin = _new_instance(module, {"enabled": True, "channel": "huawei"})
+    store = _stub_storage(plugin)
+    store[module.BOUND_DEVICES_KEY] = [
+        {"device_id": "d1", "push_token": "tok-1", "notify_enabled": True, "status": "active", "name": "A"},
+        {"device_id": "d2", "push_token": "tok-2", "notify_enabled": True, "status": "active", "name": "B"},
+        {"device_id": "d3", "push_token": "tok-3", "notify_enabled": False, "status": "active", "name": "C"},
+    ]
+    calls = []
+
+    def fake_target(target, title, text, extras=None):
+        calls.append(target)
+        return True, "ok"
+
+    plugin._push_target = fake_target
+
+    ok, message = plugin._push("t", "x", {})
+    assert ok is True
+    assert calls == ["tok-1", "tok-2"]
+    assert "2/2 台成功" in message
+    assert plugin._load_devices()[0]["last_ok"] is True
