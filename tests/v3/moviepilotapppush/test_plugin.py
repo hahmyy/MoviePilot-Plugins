@@ -37,9 +37,9 @@ def test_manifest_and_plugin_are_v3_aligned() -> None:
         if isinstance(node, ast.ImportFrom)
     }
 
-    assert manifest["version"] == "1.0.16"
+    assert manifest["version"] == "1.0.17"
     assert manifest["system_version"] == ">=3.0.0"
-    assert 'plugin_version = "1.0.16"' in source
+    assert 'plugin_version = "1.0.17"' in source
     assert manifest["icon"] == "MoviePilotAppPush.png"
     assert (ROOT / "icons" / manifest["icon"]).is_file()
     assert not any(
@@ -553,33 +553,31 @@ def test_huawei_missing_config_returns_readable_error() -> None:
     assert result["code"] != 0 and "华为" in result["msg"]
     assert "private_key" not in json.dumps(result, ensure_ascii=False)
 
-def test_form_shows_channel_fields_with_v_show_and_json_upload() -> None:
-    """配置页按渠道即时显示字段，并支持上传服务账号 JSON。"""
+def test_form_only_keeps_test_fields() -> None:
+    """配置页只留测试项；渠道与凭据字段不再渲染，中转域名内置。"""
     module = _load_plugin()
     plugin = _new_instance(module, {})
     form, defaults = plugin.get_form()
     components = form[0]["content"]
+    models = [item.get("props", {}).get("model") for item in components]
 
-    def props_for(model):
-        for item in components:
-            if item.get("props", {}).get("model") == model:
-                return item["props"]
-        raise AssertionError("missing field: " + model)
-
-    assert props_for("appkey")["v-show"] == "channel !== 'huawei'"
-    assert props_for("mastersecret")["v-show"] == "channel !== 'huawei'"
-    assert props_for("project_id")["v-show"] == "channel === 'huawei'"
-    assert props_for("service_account_json")["v-show"] == "channel === 'huawei'"
-    assert props_for("huawei_category")["v-show"] == "channel === 'huawei'"
-
-    file_inputs = [item for item in components if item.get("component") == "VFileInput"]
-    assert len(file_inputs) == 1
-    file_props = file_inputs[0]["props"]
-    assert file_props["v-show"] == "channel === 'huawei'"
-    handler = file_props["onUpdate:modelValue"]
-    assert "service_account_json" in handler
-    assert defaults["channel"] == "jpush" and defaults["service_account_json"] == ""
-    assert "service_account_file" not in defaults
+    for model in ("enabled", "apikey", "msgtypes", "testtitle", "testtext"):
+        assert model in models
+    for model in (
+        "channel",
+        "token",
+        "appkey",
+        "mastersecret",
+        "appid",
+        "project_id",
+        "service_account_json",
+        "huawei_category",
+    ):
+        assert model not in models
+    assert not [item for item in components if item.get("component") == "VFileInput"]
+    assert defaults["channel"] == "gateway"
+    assert defaults["service_account_json"] == ""
+    assert "push.hahp.cn" in json.dumps(components, ensure_ascii=False)
 
 
 def test_huawei_error_codes_are_readable() -> None:
@@ -873,3 +871,45 @@ def test_push_fans_out_to_enabled_devices() -> None:
     assert calls == ["tok-1", "tok-2"]
     assert "2/2 台成功" in message
     assert plugin._load_devices()[0]["last_ok"] is True
+
+
+def test_gateway_push_posts_to_builtin_endpoint(monkeypatch) -> None:
+    """推送统一发到 push.hahp.cn，并带站点凭据。"""
+    module = _load_plugin()
+    plugin = _new_instance(module, {"enabled": True, "channel": "gateway"})
+    store = _stub_storage(plugin)
+    store[module.BOUND_DEVICES_KEY] = [
+        {"device_id": "d1", "push_token": "tok-1", "notify_enabled": True, "status": "active", "name": "A"}
+    ]
+    captured = {}
+
+    class FakeResponse:
+        status_code = 202
+
+        def json(self):
+            return {"code": 0, "msg": "accepted"}
+
+    class FakeHttp:
+        def __init__(self, **kwargs):
+            pass
+
+        async def post(self, url, json=None, headers=None, **kwargs):
+            captured["url"] = url
+            captured["json"] = json
+            captured["headers"] = headers
+            return FakeResponse()
+
+    monkeypatch.setattr(module, "AsyncRequestUtils", FakeHttp)
+
+    async def noop_write(key, value):
+        return None
+
+    plugin._write_data = noop_write
+    ok, message = asyncio.run(plugin._push("标题", "正文", {"page": "system-message"}))
+
+    assert ok is True, message
+    assert captured["url"] == "https://push.hahp.cn/v1/messages"
+    assert captured["headers"]["Authorization"].startswith("Bearer ")
+    assert captured["json"]["install_id"] == plugin._install_id
+    assert captured["json"]["target"]["value"] == "tok-1"
+    assert captured["json"]["notification"]["click"]["data"]["page"] == "system-message"

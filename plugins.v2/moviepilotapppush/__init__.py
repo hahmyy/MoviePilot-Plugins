@@ -250,6 +250,9 @@ HUAWEI_PUSH_URL_TEMPLATE = "https://push-api.cloud.huawei.com/v3/{project_id}/me
 HUAWEI_DEFAULT_TOKEN_URI = "https://oauth-login.cloud.huawei.com/oauth2/v3/token"
 HUAWEI_JWT_BEARER_GRANT = "urn:ietf:params:oauth:grant-type:jwt-bearer"
 HUAWEI_SUCCESS_CODE = "80000000"
+# 内置中转：所有推送统一走这里，用户无需配置渠道与服务端凭据
+GATEWAY_BASE_URL = "https://push.hahp.cn"
+GATEWAY_MESSAGES_URL = GATEWAY_BASE_URL + "/v1/messages"
 MAX_EXTRAS_TITLE_LENGTH = 120
 MAX_EXTRAS_TEXT_LENGTH = 300
 MAX_HUAWEI_BODY_LENGTH = 1000
@@ -479,7 +482,7 @@ class MoviePilotAppPush(_PluginBase):
     # 插件图标
     plugin_icon = "MoviePilotAppPush.png"
     # 插件版本
-    plugin_version = "0.1.16"
+    plugin_version = "0.1.17"
     # 插件作者
     plugin_author = "hahmyy"
     # 作者主页
@@ -514,6 +517,7 @@ class MoviePilotAppPush(_PluginBase):
     _hw_token_key = ""
     _hw_token_expire_at = 0.0
     _install_id = ""
+    _install_secret = ""
 
     # ------------------------------------------------------------------ #
     # 生命周期
@@ -530,8 +534,8 @@ class MoviePilotAppPush(_PluginBase):
         self._test_title = str(config.get("testtitle") or "").strip()
         self._test_text = str(config.get("testtext") or "").strip()
         self._channel = str(config.get("channel") or "jpush").strip().lower()
-        if self._channel not in ("jpush", "huawei"):
-            self._channel = "jpush"
+        if self._channel not in ("gateway", "jpush", "huawei"):
+            self._channel = "gateway"
         self._appid = str(config.get("appid") or "").strip()
         self._project_id = str(config.get("project_id") or "").strip()
         self._hw_category = str(config.get("huawei_category") or "MARKETING").strip() or "MARKETING"
@@ -611,7 +615,7 @@ class MoviePilotAppPush(_PluginBase):
         )
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        """配置页：按推送渠道即时显示对应字段。"""
+        """配置页只保留测试相关项；推送统一走内置中转，不再暴露渠道凭据。"""
         bound = len(self._load_devices())
         head = [
             {
@@ -622,9 +626,9 @@ class MoviePilotAppPush(_PluginBase):
                     "density": "compact",
                     "class": "mb-2",
                     "text": (
-                        "切换推送渠道后会立即显示对应字段：极光填 AppKey / Master Secret，"
-                        "华为填项目 ID 与服务账号 JSON。设备在 App「设置 → 通知」开启后自动绑定，"
-                        "当前已绑定 {} 台（安装 ID：{}）。"
+                        "推送已统一走内置中转（push.hahp.cn），无需填写渠道与服务端凭据。"
+                        "设备在 App「设置 → 通知」开启后自动绑定，当前已绑定 {} 台"
+                        "（安装 ID：{}）。"
                     ).format(bound, self._install_id or "-"),
                 },
             },
@@ -750,9 +754,20 @@ class MoviePilotAppPush(_PluginBase):
                 },
             },
         ]
-        return [{"component": "VForm", "content": head + jpush_fields + huawei_fields + tail}], {
+        # 只保留测试项（启停 / Push Key / 消息类型 / 测试标题与内容）；
+        # 渠道与凭据字段已由内置中转取代，不再渲染。
+        allowed = {"enabled", "apikey", "msgtypes", "testtitle", "testtext"}
+        content = []
+        for item in head + jpush_fields + huawei_fields + tail:
+            if item.get("component") == "VFileInput":
+                continue
+            model = item.get("props", {}).get("model")
+            if model is not None and model not in allowed:
+                continue
+            content.append(item)
+        return [{"component": "VForm", "content": content}], {
             "enabled": False,
-            "channel": "jpush",
+            "channel": "gateway",
             "apikey": "",
             "token": "",
             "appkey": "",
@@ -1136,7 +1151,10 @@ class MoviePilotAppPush(_PluginBase):
     def _dashboard_status_alert(self, stats: dict) -> dict:
         ready, ready_message = self._channel_ready()
         configured = bool(self._enabled and ready)
-        channel_name = "华为 Push Kit" if self._channel == "huawei" else "极光 JPush"
+        channel_name = {
+            "gateway": "内置中转（push.hahp.cn）",
+            "huawei": "华为 Push Kit",
+        }.get(self._channel, "极光 JPush")
         if not self._enabled:
             alert_type = "warning"
             text = "未就绪：插件未启用"
@@ -1373,6 +1391,12 @@ class MoviePilotAppPush(_PluginBase):
 
     def _channel_ready(self) -> Tuple[bool, str]:
         """检查当前渠道的最小可用配置。"""
+        if self._channel == "gateway":
+            if not self._install_secret:
+                return False, "站点标识未初始化，请重新保存插件配置"
+            if not self._active_devices():
+                return False, "暂无绑定设备：请在 App「设置 → 通知」中开启"
+            return True, ""
         if self._channel == "huawei":
             if not self._has_target():
                 return False, "未绑定设备，且未配置华为 Push Token"
@@ -1436,9 +1460,18 @@ class MoviePilotAppPush(_PluginBase):
         identity = self._read_data(INSTALL_IDENTITY_KEY)
         if isinstance(identity, dict) and _coerce_str(identity.get("install_id")):
             self._install_id = _coerce_str(identity.get("install_id"))
+            self._install_secret = _coerce_str(identity.get("install_secret"))
+            if not self._install_secret:
+                self._install_secret = secrets.token_urlsafe(24)
+                identity["install_secret"] = self._install_secret
+                try:
+                    self.save_data(INSTALL_IDENTITY_KEY, identity)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("MoviePilotAppPush 补写安装密钥失败: {}".format(exc))
             return
         identity = _new_install_identity()
         self._install_id = identity["install_id"]
+        self._install_secret = identity["install_secret"]
         try:
             self.save_data(INSTALL_IDENTITY_KEY, identity)
         except Exception as exc:  # noqa: BLE001
@@ -1471,7 +1504,9 @@ class MoviePilotAppPush(_PluginBase):
         ]
 
     def _has_target(self) -> bool:
-        """是否至少有一个可推送目标（绑定设备或兼容的单一 Token）。"""
+        """是否至少有一个可推送目标。"""
+        if self._channel == "gateway":
+            return bool(self._active_devices())
         return bool(self._active_devices()) or bool(self._token)
 
     def _bind_device(self, payload: dict, user_id: str, user_name: str) -> dict:
@@ -1662,7 +1697,9 @@ class MoviePilotAppPush(_PluginBase):
     # 极光推送 v3
     # ------------------------------------------------------------------ #
     def _push(self, title: str, text: str, extras: Optional[dict] = None) -> Tuple[bool, str]:
-        """按绑定设备分发推送；没有绑定设备时回退到单一 Token（兼容旧配置）。"""
+        """按绑定设备分发推送；内置中转优先，旧渠道按设备回退。"""
+        if self._channel == "gateway":
+            return self._push_via_gateway(title, text, extras)
         devices = self._active_devices()
         if not devices:
             if not self._token:
@@ -1690,6 +1727,84 @@ class MoviePilotAppPush(_PluginBase):
         if success > 0:
             return True, "{}/{} 台成功（{}）".format(success, len(devices), summary)
         return False, "全部失败（{}）".format(summary)
+
+    def _push_via_gateway(
+        self, title: str, text: str, extras: Optional[dict] = None
+    ) -> Tuple[bool, str]:
+        """逐台设备提交到内置中转，保留每台设备的最近投递结果。"""
+        devices = self._active_devices()
+        if not devices:
+            return False, "没有可推送的设备：请在 App「设置 → 通知」中开启"
+        success = 0
+        details = []
+        for device in devices:
+            ok, message = self._push_gateway(device, title, text, extras)
+            self._update_device_result(device, ok, message)
+            if ok:
+                success += 1
+            details.append(
+                "{}：{}".format(
+                    _truncate(device.get("name"), 12) or "设备",
+                    "成功" if ok else _truncate(message, 40),
+                )
+            )
+        self._save_devices(devices)
+        summary = "；".join(details)
+        if success > 0:
+            return True, "{}/{} 台成功（{}）".format(success, len(devices), summary)
+        return False, "全部失败（{}）".format(summary)
+
+    def _push_gateway(
+        self, device: dict, title: str, text: str, extras: Optional[dict] = None
+    ) -> Tuple[bool, str]:
+        """把一条消息交给 push.hahp.cn，由中转完成华为推送。"""
+        token = _coerce_str(device.get("push_token"))
+        if not token:
+            return False, "设备缺少 Push Token"
+        if not self._install_secret:
+            return False, "站点标识未初始化，请重新保存插件配置"
+        category = self._hw_category if self._hw_category != "MARKETING" else "SUBSCRIPTION"
+        payload = {
+            "install_id": self._install_id,
+            "device_id": _coerce_str(device.get("device_id")),
+            "target": {"type": "token", "value": token},
+            "notification": {
+                "category": category,
+                "title": _truncate(title, MAX_EXTRAS_TITLE_LENGTH) or "MoviePilot",
+                "body": _truncate(text, MAX_HUAWEI_BODY_LENGTH)
+                or _truncate(title, MAX_HUAWEI_BODY_LENGTH),
+                "click": {"actionType": 0, "data": extras or {}},
+            },
+            "client_msg_id": "mp-{}-{}".format(self._install_id, int(time.time() * 1000)),
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer {}".format(self._install_secret),
+            "X-Install-Id": self._install_id,
+        }
+        try:
+            response = RequestUtils(**_push_http_options()).post(
+                GATEWAY_MESSAGES_URL, json=payload, headers=headers
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("MoviePilotAppPush 中转请求异常: {}".format(exc))
+            return False, "中转请求异常: {}".format(exc)
+        if response is None:
+            return False, "中转无响应（网络不可达或超时）"
+        status = int(getattr(response, "status_code", 0) or 0)
+        try:
+            body = response.json()
+        except Exception:  # noqa: BLE001
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        code = body.get("code")
+        message = _coerce_str(body.get("msg")) or _coerce_str(body.get("message"))
+        if status < 400 and (code is None or str(code) in ("0", "200", "202")):
+            return True, "已受理" + ("（{}）".format(message) if message else "")
+        return False, "中转返回失败（{}）：{}".format(
+            code if code is not None else status, message or "无详细信息"
+        )
 
     def _push_target(
         self, target: str, title: str, text: str, extras: Optional[dict] = None

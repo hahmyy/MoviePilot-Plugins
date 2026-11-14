@@ -6,17 +6,15 @@
 ## 约定
 
 - 插件 ID：`MoviePilotAppPush`（App 端据此渲染专用配置页并调用 `/run` 测试接口）。
-- 配置项：
-  - `enabled`：是否启用
-  - `apikey`：Push Key（App 调测试接口时的凭据）
-  - `token`：兼容的单一推送目标（极光 Alias / 华为 Push Token）；已绑定设备优先
-  - `appkey`：极光 AppKey（服务端鉴权用户名）
-  - `mastersecret`：极光 Master Secret（服务端鉴权密码，仅服务端保存）
+- 推送链路：插件 → 内置中转 `https://push.hahp.cn` → 华为 Push Kit；用户无需配置渠道或服务端凭据。
+- 配置页只保留测试项：`enabled`、`apikey`（测试接口凭据）、`msgtypes`、`testtitle`、`testtext`。
+- 兼容旧配置：`channel` / `token` / `appkey` / `mastersecret` / `appid` / `project_id` /
+  `service_account_json` / `huawei_category` 仍保留在存储中，但不再在设置页展示。
 
 ## 接口
 
 - `GET /api/v1/plugin/MoviePilotAppPush/run?apikey=<PushKey>`
-  - 需携带登录态（`auth: "bear"`），校验 apikey 后向配置的 token 发送一条测试通知。
+  - 需携带登录态（`auth: "bear"`），校验 apikey 后向已绑定设备（无绑定时回退 `token`）发送一条测试通知。
   - 响应：`{"code": 0, "msg": "..."}`；失败 `code` 非 0。
 - `POST /api/v1/plugin/MoviePilotAppPush/device/bind`（`auth: "bear"`）
   - App 开启通知后登记设备：`device_id` / `push_token` / `device_name` / `notify_enabled`。
@@ -63,9 +61,18 @@
 - 支持消息类型多选筛选（媒体服务器/订阅/整理入库/资源下载/站点/手动处理/其它/智能体/插件），不选则转发全部。
 - 配置页可自定义测试标题与内容，并用“发送测试（保存后立即发送一条）”开关立即发送；测试接口支持 title/text 查询参数覆盖。
 - 图标：仓库根 `icons/MoviePilotAppPush.png`（V2/V3 共用），索引 `icon` 字段一致。
-- 版本：`package.json` / `package.v2.json` 内 `MoviePilotAppPush` 版本 0.1.16，与插件类 `plugin_version` 一致。
+- 版本：`package.json` / `package.v2.json` 内 `MoviePilotAppPush` 版本 0.1.17，与插件类 `plugin_version` 一致。
 
-## 华为 Push Kit 直连渠道（可选）
+## 内置中转（当前默认）
+
+- `channel` 默认 `gateway`：推送统一 `POST https://push.hahp.cn/v1/messages`，
+  Header `Authorization: Bearer <install_secret>`、`X-Install-Id: <install_id>`。
+- 请求体：`install_id` / `device_id` / `target{type,value}` /
+  `notification{category,title,body,click}` / `client_msg_id`；中转负责换取华为 access_token
+  并调用 v3 接口。
+- 设置页不再展示渠道与凭据字段；`install_id` 在配置页与详情页可见，设备由 App 绑定。
+
+## 旧直连渠道（仅兼容旧配置）
 
 - `channel` 选 `huawei` 时，`token` 字段填华为 Push Token（不再是极光 Alias）。
 - 需配置 `project_id`（AGC 项目 ID）和 `service_account_json`（AGC 服务账号 JSON，含 key_id /
