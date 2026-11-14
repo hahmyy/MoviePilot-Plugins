@@ -37,9 +37,9 @@ def test_manifest_and_plugin_are_v3_aligned() -> None:
         if isinstance(node, ast.ImportFrom)
     }
 
-    assert manifest["version"] == "1.0.15"
+    assert manifest["version"] == "1.0.16"
     assert manifest["system_version"] == ">=3.0.0"
-    assert 'plugin_version = "1.0.15"' in source
+    assert 'plugin_version = "1.0.16"' in source
     assert manifest["icon"] == "MoviePilotAppPush.png"
     assert (ROOT / "icons" / manifest["icon"]).is_file()
     assert not any(

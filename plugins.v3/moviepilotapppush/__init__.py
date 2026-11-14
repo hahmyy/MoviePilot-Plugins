@@ -476,7 +476,7 @@ class MoviePilotAppPush(_PluginBase):
     plugin_name = "App 推送"
     plugin_desc = "将 MoviePilot 通知推送到鸿蒙/Android/iOS 客户端（系统级推送）。"
     plugin_icon = "MoviePilotAppPush.png"
-    plugin_version = "1.0.15"
+    plugin_version = "1.0.16"
     plugin_author = "hahmyy"
     author_url = "https://github.com/hahmyy"
     plugin_config_prefix = "moviepilotapppush_"
@@ -997,7 +997,7 @@ class MoviePilotAppPush(_PluginBase):
         success = result.get("code") == 0
         lines = [
             "测试时间：{}".format(result.get("time") or "-"),
-            "目标 Token(Alias)：{}".format(result.get("token") or "未配置"),
+            "推送目标：{}".format(result.get("token") or "未配置"),
             "返回结果：{}".format(result.get("msg") or "-"),
         ]
         return [
@@ -1633,7 +1633,11 @@ class MoviePilotAppPush(_PluginBase):
                     "time": now,
                     "code": stats["last_test_code"],
                     "msg": stats["last_test_message"],
-                    "token": _mask_token(self._token),
+                    "token": (
+                        _mask_token(self._token)
+                        if self._token
+                        else "{} 台已绑定设备".format(len(self._load_devices()))
+                    ),
                 },
             )
 
