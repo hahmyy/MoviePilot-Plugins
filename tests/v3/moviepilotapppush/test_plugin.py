@@ -37,9 +37,9 @@ def test_manifest_and_plugin_are_v3_aligned() -> None:
         if isinstance(node, ast.ImportFrom)
     }
 
-    assert manifest["version"] == "1.0.17"
+    assert manifest["version"] == "1.0.18"
     assert manifest["system_version"] == ">=3.0.0"
-    assert 'plugin_version = "1.0.17"' in source
+    assert 'plugin_version = "1.0.18"' in source
     assert manifest["icon"] == "MoviePilotAppPush.png"
     assert (ROOT / "icons" / manifest["icon"]).is_file()
     assert not any(
@@ -577,7 +577,7 @@ def test_form_only_keeps_test_fields() -> None:
     assert not [item for item in components if item.get("component") == "VFileInput"]
     assert defaults["channel"] == "gateway"
     assert defaults["service_account_json"] == ""
-    assert "push.hahp.cn" in json.dumps(components, ensure_ascii=False)
+    assert "内置中转" in json.dumps(components, ensure_ascii=False)
 
 
 def test_huawei_error_codes_are_readable() -> None:
@@ -874,7 +874,7 @@ def test_push_fans_out_to_enabled_devices() -> None:
 
 
 def test_gateway_push_posts_to_builtin_endpoint(monkeypatch) -> None:
-    """推送统一发到 push.hahp.cn，并带站点凭据。"""
+    """推送统一发到内置中转，并带站点凭据。"""
     module = _load_plugin()
     plugin = _new_instance(module, {"enabled": True, "channel": "gateway"})
     store = _stub_storage(plugin)
@@ -908,7 +908,7 @@ def test_gateway_push_posts_to_builtin_endpoint(monkeypatch) -> None:
     ok, message = asyncio.run(plugin._push("标题", "正文", {"page": "system-message"}))
 
     assert ok is True, message
-    assert captured["url"] == "https://push.hahp.cn/v1/messages"
+    assert captured["url"] == module.GATEWAY_MESSAGES_URL
     assert captured["headers"]["Authorization"].startswith("Bearer ")
     assert captured["json"]["install_id"] == plugin._install_id
     assert captured["json"]["target"]["value"] == "tok-1"

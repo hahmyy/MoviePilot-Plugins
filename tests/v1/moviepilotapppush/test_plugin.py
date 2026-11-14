@@ -40,8 +40,8 @@ def test_manifest_and_plugin_are_v2_aligned() -> None:
         if isinstance(node, ast.ImportFrom)
     }
 
-    assert manifest["version"] == "0.1.17"
-    assert 'plugin_version = "0.1.17"' in source
+    assert manifest["version"] == "0.1.18"
+    assert 'plugin_version = "0.1.18"' in source
     assert manifest["icon"] == "MoviePilotAppPush.png"
     assert (ROOT / "icons" / manifest["icon"]).is_file()
     assert "app.core.event" in imports
@@ -167,7 +167,7 @@ def test_v2_layouts_stay_identical() -> None:
 
     package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))["MoviePilotAppPush"]
     versioned_package = json.loads((ROOT / "package.v2.json").read_text(encoding="utf-8"))["MoviePilotAppPush"]
-    assert package["version"] == versioned_package["version"] == "0.1.17"
+    assert package["version"] == versioned_package["version"] == "0.1.18"
     assert package["icon"] == versioned_package["icon"] == "MoviePilotAppPush.png"
 
 
@@ -533,7 +533,7 @@ def test_form_only_keeps_test_fields() -> None:
     assert not [item for item in components if item.get("component") == "VFileInput"]
     assert defaults["channel"] == "gateway"
     assert defaults["service_account_json"] == ""
-    assert "push.hahp.cn" in json.dumps(components, ensure_ascii=False)
+    assert "内置中转" in json.dumps(components, ensure_ascii=False)
 
 
 def test_huawei_error_codes_are_readable() -> None:
@@ -826,7 +826,7 @@ def test_push_fans_out_to_enabled_devices() -> None:
 
 
 def test_gateway_push_posts_to_builtin_endpoint(monkeypatch) -> None:
-    """推送统一发到 push.hahp.cn，并带站点凭据。"""
+    """推送统一发到内置中转，并带站点凭据。"""
     module = _load_plugin()
     plugin = _new_instance(module, {"enabled": True, "channel": "gateway"})
     store = _stub_storage(plugin)
@@ -856,7 +856,7 @@ def test_gateway_push_posts_to_builtin_endpoint(monkeypatch) -> None:
     ok, message = plugin._push("标题", "正文", {"page": "system-message"})
 
     assert ok is True, message
-    assert captured["url"] == "https://push.hahp.cn/v1/messages"
+    assert captured["url"] == module.GATEWAY_MESSAGES_URL
     assert captured["headers"]["Authorization"].startswith("Bearer ")
     assert captured["json"]["install_id"] == plugin._install_id
     assert captured["json"]["target"]["value"] == "tok-1"

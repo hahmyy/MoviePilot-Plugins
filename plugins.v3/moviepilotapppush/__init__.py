@@ -223,9 +223,31 @@ def _build_extras(
     return extras
 
 
+NOTIFICATION_TYPE_FALLBACK = [
+    ("Download", "资源下载"),
+    ("Organize", "整理入库"),
+    ("Subscribe", "订阅"),
+    ("SiteMessage", "站点消息"),
+    ("MediaServer", "媒体服务器通知"),
+    ("Manual", "手动处理通知"),
+    ("Plugin", "插件消息"),
+]
+
+
 def _notification_type_options() -> list:
-    """枚举宿主消息类型，供配置页多选。"""
-    return [{"title": item.value, "value": item.name} for item in NotificationType]
+    """枚举宿主消息类型，供配置页多选；宿主枚举缺失时用内置清单兜底。"""
+    options = []
+    seen = set()
+    try:
+        for item in NotificationType:
+            options.append({"title": item.value, "value": item.name})
+            seen.add(item.name)
+    except Exception:  # noqa: BLE001
+        options = []
+    for name, title in NOTIFICATION_TYPE_FALLBACK:
+        if name not in seen:
+            options.append({"title": title, "value": name})
+    return options
 
 
 def _notification_type_name(value: Any) -> str:
@@ -479,7 +501,7 @@ class MoviePilotAppPush(_PluginBase):
     plugin_name = "App 推送"
     plugin_desc = "将 MoviePilot 通知推送到鸿蒙/Android/iOS 客户端（系统级推送）。"
     plugin_icon = "MoviePilotAppPush.png"
-    plugin_version = "1.0.17"
+    plugin_version = "1.0.18"
     plugin_author = "hahmyy"
     author_url = "https://github.com/hahmyy"
     plugin_config_prefix = "moviepilotapppush_"
@@ -628,7 +650,7 @@ class MoviePilotAppPush(_PluginBase):
                     "density": "compact",
                     "class": "mb-2",
                     "text": (
-                        "推送已统一走内置中转（push.hahp.cn），无需填写渠道与服务端凭据。"
+                        "推送已统一走内置中转，无需填写渠道与服务端凭据。"
                         "设备在 App「设置 → 通知」开启后自动绑定，当前已绑定 {} 台"
                         "（安装 ID：{}）。"
                     ).format(bound, self._install_id or "-"),
@@ -727,8 +749,9 @@ class MoviePilotAppPush(_PluginBase):
                 "props": {
                     "multiple": True,
                     "chips": True,
+                    "clearable": True,
                     "model": "msgtypes",
-                    "label": "消息类型（不选则转发全部）",
+                    "label": "推送哪些通知（不选则全部推送）",
                     "items": _notification_type_options(),
                 },
             },
@@ -1154,7 +1177,7 @@ class MoviePilotAppPush(_PluginBase):
         ready, ready_message = self._channel_ready()
         configured = bool(self._enabled and ready)
         channel_name = {
-            "gateway": "内置中转（push.hahp.cn）",
+            "gateway": "内置中转",
             "huawei": "华为 Push Kit",
         }.get(self._channel, "极光 JPush")
         if not self._enabled:
@@ -1769,7 +1792,7 @@ class MoviePilotAppPush(_PluginBase):
     async def _push_gateway(
         self, device: dict, title: str, text: str, extras: dict | None = None
     ) -> tuple[bool, str]:
-        """把一条消息交给 push.hahp.cn，由中转完成华为推送。"""
+        """把一条消息交给内置中转，由中转完成华为推送。"""
         token = _coerce_str(device.get("push_token"))
         if not token:
             return False, "设备缺少 Push Token"

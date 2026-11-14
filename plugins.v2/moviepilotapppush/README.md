@@ -6,7 +6,7 @@
 ## 约定
 
 - 插件 ID：`MoviePilotAppPush`（App 端据此渲染专用配置页并调用 `/run` 测试接口）。
-- 推送链路：插件 → 内置中转 `https://push.hahp.cn` → 华为 Push Kit；用户无需配置渠道或服务端凭据。
+- 推送链路：插件 → 内置中转（地址内置在插件代码中，不对外展示）→ 华为 Push Kit；用户无需配置渠道或服务端凭据。
 - 配置页只保留测试项：`enabled`、`apikey`（测试接口凭据）、`msgtypes`、`testtitle`、`testtext`。
 - 兼容旧配置：`channel` / `token` / `appkey` / `mastersecret` / `appid` / `project_id` /
   `service_account_json` / `huawei_category` 仍保留在存储中，但不再在设置页展示。
@@ -61,11 +61,11 @@
 - 支持消息类型多选筛选（媒体服务器/订阅/整理入库/资源下载/站点/手动处理/其它/智能体/插件），不选则转发全部。
 - 配置页可自定义测试标题与内容，并用“发送测试（保存后立即发送一条）”开关立即发送；测试接口支持 title/text 查询参数覆盖。
 - 图标：仓库根 `icons/MoviePilotAppPush.png`（V2/V3 共用），索引 `icon` 字段一致。
-- 版本：`package.json` / `package.v2.json` 内 `MoviePilotAppPush` 版本 0.1.17，与插件类 `plugin_version` 一致。
+- 版本：`package.json` / `package.v2.json` 内 `MoviePilotAppPush` 版本 0.1.18，与插件类 `plugin_version` 一致。
 
 ## 内置中转（当前默认）
 
-- `channel` 默认 `gateway`：推送统一 `POST https://push.hahp.cn/v1/messages`，
+- `channel` 默认 `gateway`：推送统一 `POST <内置中转地址>/v1/messages`，
   Header `Authorization: Bearer <install_secret>`、`X-Install-Id: <install_id>`。
 - 请求体：`install_id` / `device_id` / `target{type,value}` /
   `notification{category,title,body,click}` / `client_msg_id`；中转负责换取华为 access_token
