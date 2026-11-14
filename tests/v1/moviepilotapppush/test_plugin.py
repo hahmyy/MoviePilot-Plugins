@@ -40,8 +40,8 @@ def test_manifest_and_plugin_are_v2_aligned() -> None:
         if isinstance(node, ast.ImportFrom)
     }
 
-    assert manifest["version"] == "0.1.18"
-    assert 'plugin_version = "0.1.18"' in source
+    assert manifest["version"] == "0.1.19"
+    assert 'plugin_version = "0.1.19"' in source
     assert manifest["icon"] == "MoviePilotAppPush.png"
     assert (ROOT / "icons" / manifest["icon"]).is_file()
     assert "app.core.event" in imports
@@ -167,7 +167,7 @@ def test_v2_layouts_stay_identical() -> None:
 
     package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))["MoviePilotAppPush"]
     versioned_package = json.loads((ROOT / "package.v2.json").read_text(encoding="utf-8"))["MoviePilotAppPush"]
-    assert package["version"] == versioned_package["version"] == "0.1.18"
+    assert package["version"] == versioned_package["version"] == "0.1.19"
     assert package["icon"] == versioned_package["icon"] == "MoviePilotAppPush.png"
 
 

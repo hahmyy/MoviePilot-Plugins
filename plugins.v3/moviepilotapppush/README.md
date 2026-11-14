@@ -66,7 +66,7 @@
 
 ## 内置中转（当前默认）
 
-- `channel` 默认 `gateway`：推送统一 `POST <内置中转地址>/v1/messages`，
+- `channel` 默认 `gateway`：推送统一 `POST <内置中转地址>/v1/messages/`（结尾斜杠不能省），
   Header `Authorization: Bearer <install_secret>`、`X-Install-Id: <install_id>`。
 - 请求体：`install_id` / `device_id` / `target{type,value}` /
   `notification{category,title,body,click}` / `client_msg_id`；中转负责换取华为 access_token

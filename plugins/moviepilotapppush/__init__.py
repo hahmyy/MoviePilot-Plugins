@@ -274,7 +274,7 @@ HUAWEI_JWT_BEARER_GRANT = "urn:ietf:params:oauth:grant-type:jwt-bearer"
 HUAWEI_SUCCESS_CODE = "80000000"
 # 内置中转：所有推送统一走这里，用户无需配置渠道与服务端凭据
 GATEWAY_BASE_URL = "https://push.hahp.cn"
-GATEWAY_MESSAGES_URL = GATEWAY_BASE_URL + "/v1/messages"
+GATEWAY_MESSAGES_URL = GATEWAY_BASE_URL + "/v1/messages/"
 MAX_EXTRAS_TITLE_LENGTH = 120
 MAX_EXTRAS_TEXT_LENGTH = 300
 MAX_HUAWEI_BODY_LENGTH = 1000
@@ -504,7 +504,7 @@ class MoviePilotAppPush(_PluginBase):
     # 插件图标
     plugin_icon = "MoviePilotAppPush.png"
     # 插件版本
-    plugin_version = "0.1.18"
+    plugin_version = "0.1.19"
     # 插件作者
     plugin_author = "hahmyy"
     # 作者主页
