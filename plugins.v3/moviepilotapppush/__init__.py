@@ -498,10 +498,10 @@ class MoviePilotAppPush(_PluginBase):
     - 服务端凭据 appkey / mastersecret 只在服务端配置，不下发、不打印。
     """
 
-    plugin_name = "App 推送"
+    plugin_name = "MP tool推送"
     plugin_desc = "将 MoviePilot 通知推送到鸿蒙/Android/iOS 客户端（系统级推送）。"
     plugin_icon = "MoviePilotAppPush.png"
-    plugin_version = "1.0.20"
+    plugin_version = "1.0.21"
     plugin_author = "hahmyy"
     author_url = "https://github.com/hahmyy"
     plugin_config_prefix = "moviepilotapppush_"

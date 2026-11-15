@@ -1,6 +1,6 @@
 # MoviePilotAppPush
 
-把 MoviePilot 服务端通知推送到鸿蒙/Android/iOS 客户端（系统级推送）。
+把 MoviePilot 服务端通知推送到鸿蒙 客户端（系统级推送）。
 
 ## 约定
 

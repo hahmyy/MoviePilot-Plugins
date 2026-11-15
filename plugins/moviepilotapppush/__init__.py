@@ -498,13 +498,13 @@ class MoviePilotAppPush(_PluginBase):
     """
 
     # 插件名称
-    plugin_name = "App 推送"
+    plugin_name = "MP tool推送"
     # 插件描述
     plugin_desc = "将 MoviePilot 通知推送到鸿蒙/Android/iOS 客户端（系统级推送）。"
     # 插件图标
     plugin_icon = "MoviePilotAppPush.png"
     # 插件版本
-    plugin_version = "0.1.20"
+    plugin_version = "0.1.21"
     # 插件作者
     plugin_author = "hahmyy"
     # 作者主页
