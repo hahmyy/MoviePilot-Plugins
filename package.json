@@ -1,15 +1,16 @@
 {
   "MoviePilotAppPush": {
     "name": "MP tool推送",
-    "description": "将 MoviePilot 通知推送到鸿蒙/Android/iOS 客户端（系统级推送）。",
+    "description": "将 MoviePilot 通知通过华为官方推送服务送达鸿蒙客户端（系统级通知，应用退到后台也能收到）。",
     "labels": "通知,推送",
-    "version": "0.1.21",
+    "version": "0.1.22",
     "icon": "MoviePilotAppPush.png",
     "author": "hahmyy",
     "level": 1,
     "v2": true,
     "v3": false,
     "history": {
+      "v0.1.22": "配置页去掉从来没生效过的 Push Key；插件历史消息里的推送渠道不再显示「极光」，统一显示「官方推送」——现在只走华为官方推送。",
       "v0.1.21": "插件显示名改为「MP tool推送」，与 App 设置里的提示保持一致（插件 ID 与接口路径不变）。",
       "v0.1.20": "修正：历史配置里残留的推送渠道将被忽略，所有推送统一走内置中转，不再出现服务账号认证失败（80200001）。",
       "v0.1.19": "修正推送请求路径（结尾带斜杠），避免服务端 301 跳转把 POST 降级成 GET 导致推送失败。",

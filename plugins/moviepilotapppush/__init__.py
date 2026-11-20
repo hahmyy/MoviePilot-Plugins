@@ -413,21 +413,6 @@ def _build_service_account_jwt(account: dict, now: int = None) -> str:
     return "{}.{}".format(signing_input, _b64url(signature))
 
 
-# 前端 VFileInput 上传回调：把文件内容读入 service_account_json 文本字段，
-# 模型里不保存 File 对象（FormRender 会以 with(model) 作用域执行该表达式）。
-_SERVICE_ACCOUNT_UPLOAD_HANDLER = (
-    "(files) => { const f = Array.isArray(files) ? files[0] : files; "
-    "if (!f) { return; } const reader = new FileReader(); "
-    "reader.onload = function () { service_account_json = String(reader.result || ''); }; "
-    "reader.readAsText(f, 'utf-8'); }"
-)
-
-
-def _huawei_category_options() -> list:
-    """华为通知分类选项（官方文档取值）。"""
-    return [{"title": item, "value": item} for item in HUAWEI_CATEGORIES]
-
-
 def _build_huawei_payload(
     title: str, text: str, category: str, push_token: str, data: dict = None
 ) -> dict:
@@ -504,7 +489,7 @@ class MoviePilotAppPush(_PluginBase):
     # 插件图标
     plugin_icon = "MoviePilotAppPush.png"
     # 插件版本
-    plugin_version = "0.1.21"
+    plugin_version = "0.1.22"
     # 插件作者
     plugin_author = "hahmyy"
     # 作者主页
@@ -521,7 +506,6 @@ class MoviePilotAppPush(_PluginBase):
     TEST_TEXT = "这是一条来自 MoviePilot 的测试通知"
 
     _enabled = False
-    _apikey = ""
     _token = ""
     _appkey = ""
     _mastersecret = ""
@@ -547,7 +531,6 @@ class MoviePilotAppPush(_PluginBase):
     def init_plugin(self, config: dict = None) -> None:
         config = config or {}
         self._enabled = bool(config.get("enabled"))
-        self._apikey = str(config.get("apikey") or "")
         self._token = str(config.get("token") or "").strip()
         self._appkey = str(config.get("appkey") or "").strip()
         self._mastersecret = str(config.get("mastersecret") or "").strip()
@@ -611,7 +594,6 @@ class MoviePilotAppPush(_PluginBase):
         """导出当前配置，供保存与重置测试开关使用。"""
         return {
             "enabled": self._enabled,
-            "apikey": self._apikey,
             "token": self._token,
             "appkey": self._appkey,
             "mastersecret": self._mastersecret,
@@ -637,9 +619,9 @@ class MoviePilotAppPush(_PluginBase):
         )
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        """配置页只保留测试相关项；推送统一走内置中转，不再暴露渠道凭据。"""
+        """配置页只留开关、消息类型与测试内容：推送统一走华为官方推送。"""
         bound = len(self._load_devices())
-        head = [
+        content = [
             {
                 "component": "VAlert",
                 "props": {
@@ -648,100 +630,13 @@ class MoviePilotAppPush(_PluginBase):
                     "density": "compact",
                     "class": "mb-2",
                     "text": (
-                        "推送已统一走内置中转，无需填写渠道与服务端凭据。"
-                        "设备在 App「设置 → 通知」开启后自动绑定，当前已绑定 {} 台"
-                        "（安装 ID：{}）。"
+                        "推送统一走华为官方推送服务（HarmonyOS Push Kit），无需填写渠道、"
+                        "AppKey 或任何服务端凭据。设备在 App「设置 → 通知」开启后自动绑定，"
+                        "当前已绑定 {} 台（安装 ID：{}）。"
                     ).format(bound, self._install_id or "-"),
                 },
             },
             {"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件"}},
-            {
-                "component": "VSelect",
-                "props": {
-                    "model": "channel",
-                    "label": "推送渠道",
-                    "items": [
-                        {"title": "极光 JPush", "value": "jpush"},
-                        {"title": "华为 Push Kit 直连", "value": "huawei"},
-                    ],
-                },
-            },
-            {"component": "VTextField", "props": {"model": "apikey", "label": "Push Key"}},
-            {
-                "component": "VTextField",
-                "props": {
-                    "model": "token",
-                    "label": "App Push Token（jpush=极光 Alias / huawei=华为 Push Token）",
-                },
-            },
-        ]
-        jpush_fields = [
-            {
-                "component": "VTextField",
-                "props": {
-                    "model": "appkey",
-                    "label": "JPush AppKey",
-                    "v-show": "channel !== 'huawei'",
-                },
-            },
-            {
-                "component": "VTextField",
-                "props": {
-                    "model": "mastersecret",
-                    "label": "JPush Master Secret",
-                    "type": "password",
-                    "v-show": "channel !== 'huawei'",
-                },
-            },
-        ]
-        huawei_fields = [
-            {
-                "component": "VTextField",
-                "props": {
-                    "model": "appid",
-                    "label": "华为 Client ID（appid，v3 备用）",
-                    "v-show": "channel === 'huawei'",
-                },
-            },
-            {
-                "component": "VTextField",
-                "props": {
-                    "model": "project_id",
-                    "label": "华为项目 ID（projectId）",
-                    "v-show": "channel === 'huawei'",
-                },
-            },
-            {
-                "component": "VFileInput",
-                "props": {
-                    "label": "上传服务账号 JSON（自动读取内容）",
-                    "accept": ".json,application/json",
-                    "prepend-icon": "mdi-upload",
-                    "v-show": "channel === 'huawei'",
-                    "onUpdate:modelValue": _SERVICE_ACCOUNT_UPLOAD_HANDLER,
-                },
-            },
-            {
-                "component": "VTextarea",
-                "props": {
-                    "model": "service_account_json",
-                    "label": "华为服务账号 JSON（可粘贴或上传，留空表示不修改）",
-                    "rows": 4,
-                    "auto-grow": True,
-                    "v-show": "channel === 'huawei'",
-                },
-            },
-            {
-                "component": "VSelect",
-                "props": {
-                    "model": "huawei_category",
-                    "label": "华为通知分类",
-                    "items": _huawei_category_options(),
-                    "v-show": "channel === 'huawei'",
-                },
-            },
-        ]
-        tail = [
             {
                 "component": "VSelect",
                 "props": {
@@ -777,28 +672,8 @@ class MoviePilotAppPush(_PluginBase):
                 },
             },
         ]
-        # 只保留测试项（启停 / Push Key / 消息类型 / 测试标题与内容）；
-        # 渠道与凭据字段已由内置中转取代，不再渲染。
-        allowed = {"enabled", "apikey", "msgtypes", "testtitle", "testtext"}
-        content = []
-        for item in head + jpush_fields + huawei_fields + tail:
-            if item.get("component") == "VFileInput":
-                continue
-            model = item.get("props", {}).get("model")
-            if model is not None and model not in allowed:
-                continue
-            content.append(item)
         return [{"component": "VForm", "content": content}], {
             "enabled": False,
-            "channel": "gateway",
-            "apikey": "",
-            "token": "",
-            "appkey": "",
-            "mastersecret": "",
-            "appid": "",
-            "project_id": "",
-            "service_account_json": "",
-            "huawei_category": "MARKETING",
             "msgtypes": [],
             "testtitle": "",
             "testtext": "",
@@ -898,16 +773,6 @@ class MoviePilotAppPush(_PluginBase):
 
     def _build_test_action_card(self) -> dict:
         """详情页一键测试卡片：直接调用固定 /run 接口，无需先保存。"""
-        if not self._apikey:
-            return {
-                "component": "VAlert",
-                "props": {
-                    "type": "warning",
-                    "variant": "tonal",
-                    "class": "mt-2",
-                    "text": "请先在配置页保存 Push Key 与推送凭据，再回到本页点击测试。",
-                },
-            }
         ready, ready_message = self._channel_ready()
         if not ready:
             return {
@@ -951,7 +816,6 @@ class MoviePilotAppPush(_PluginBase):
                                     "api": "/plugin/MoviePilotAppPush/run",
                                     "method": "GET",
                                     "params": {
-                                        "apikey": self._apikey,
                                         "title": self._test_title or self.TEST_TITLE,
                                         "text": self._test_text or self.TEST_TEXT,
                                     },
@@ -1175,9 +1039,9 @@ class MoviePilotAppPush(_PluginBase):
         ready, ready_message = self._channel_ready()
         configured = bool(self._enabled and ready)
         channel_name = {
-            "gateway": "内置中转",
+            "gateway": "官方推送",
             "huawei": "华为 Push Kit",
-        }.get(self._channel, "极光 JPush")
+        }.get(self._channel, "官方推送")
         if not self._enabled:
             alert_type = "warning"
             text = "未就绪：插件未启用"
@@ -1265,7 +1129,7 @@ class MoviePilotAppPush(_PluginBase):
             lines.append(
                 "[{}] {} · {} · {} · {}：{}".format(
                     item.get("time") or "-",
-                    "华为" if item.get("channel") == "huawei" else "极光",
+                    "华为" if item.get("channel") == "huawei" else "官方推送",
                     item.get("kind") or "推送",
                     "成功" if item.get("ok") else "失败",
                     _truncate(item.get("title") or "-", 20),
@@ -1286,7 +1150,7 @@ class MoviePilotAppPush(_PluginBase):
                 "methods": ["GET"],
                 "auth": "bear",
                 "summary": "发送一条测试推送",
-                "description": "App 配置页「测试」按钮调用。校验 apikey 后，向已绑定设备（或兼容的单一 Token）推送一条测试通知。",
+                "description": "App 配置页「测试」按钮调用。向已绑定设备推送一条测试通知。",
             },
             {
                 "path": "/device/bind",
@@ -1327,11 +1191,14 @@ class MoviePilotAppPush(_PluginBase):
         ]
 
     def run(self, apikey: str = None, title: str = None, text: str = None) -> dict:
-        """测试接口：校验 apikey 后发送测试通知，并记录最近一次结果。"""
+        """测试接口：发送一条测试通知，并记录最近一次结果。
+
+        `apikey` 只为兼容旧调用方保留，不再参与校验（接口本身要求登录态）。
+        """
         try:
             send_title = _coerce_str(title) or self._test_title or self.TEST_TITLE
             send_text = _coerce_str(text) or self._test_text or self.TEST_TEXT
-            result, attempted = self._execute_test(apikey, title, text)
+            result, attempted = self._execute_test(title, text)
         except Exception as exc:  # noqa: BLE001
             logger.error("MoviePilotAppPush 测试接口执行异常: {}".format(type(exc).__name__))
             return {"code": 1, "msg": "测试执行异常，请查看 MoviePilot 日志"}
@@ -1438,11 +1305,9 @@ class MoviePilotAppPush(_PluginBase):
             return False, "未配置 JPush 服务端凭据"
         return True, ""
 
-    def _execute_test(self, apikey: str = None, title: str = None, text: str = None):
+    def _execute_test(self, title: str = None, text: str = None):
         if not self._enabled:
             return {"code": 1, "msg": "插件未启用"}, False
-        if not self._apikey or (apikey or "").strip() != self._apikey.strip():
-            return {"code": 1, "msg": "Push Key 校验失败"}, False
         ready, ready_message = self._channel_ready()
         if not ready:
             return {"code": 1, "msg": ready_message}, False

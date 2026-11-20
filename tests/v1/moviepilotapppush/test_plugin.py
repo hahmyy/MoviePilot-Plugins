@@ -40,8 +40,8 @@ def test_manifest_and_plugin_are_v2_aligned() -> None:
         if isinstance(node, ast.ImportFrom)
     }
 
-    assert manifest["version"] == "0.1.21"
-    assert 'plugin_version = "0.1.21"' in source
+    assert manifest["version"] == "0.1.22"
+    assert 'plugin_version = "0.1.22"' in source
     assert manifest["icon"] == "MoviePilotAppPush.png"
     assert (ROOT / "icons" / manifest["icon"]).is_file()
     assert "app.core.event" in imports
@@ -50,32 +50,25 @@ def test_manifest_and_plugin_are_v2_aligned() -> None:
     assert not any(module.startswith(("app.sdk",)) for module in imports)
 
 
-def test_run_contract_validates_apikey_and_credentials_without_network() -> None:
-    """测试接口返回 code/msg；key 与极光凭据校验在发请求前完成。"""
+def test_run_contract_reports_gateway_readiness_without_network() -> None:
+    """测试接口返回 code/msg；不再校验 apikey，未就绪时给出可读原因。"""
     module = _load_plugin()
-    plugin = _new_instance(
-        module,
-        {
-            "enabled": True,
-            "apikey": "test-key",
-            "token": "alias-device-1",
-            "appkey": "",
-            "mastersecret": "",
-        },
-    )
+    plugin = _new_instance(module, {"enabled": True})
+    store = _stub_storage(plugin)
 
-    missing_key = plugin.run()
-    assert missing_key["code"] != 0 and "Push Key" in missing_key["msg"]
+    not_ready = plugin.run()
+    assert set(not_ready) == {"code", "msg"}
+    assert not_ready["code"] != 0 and "绑定设备" in not_ready["msg"]
 
-    wrong_key = plugin.run(apikey="wrong")
-    assert wrong_key["code"] != 0 and "Push Key" in wrong_key["msg"]
-
-    valid_key = plugin.run(apikey="test-key")
-    assert set(valid_key) == {"code", "msg"}
-    assert valid_key["code"] != 0 and "JPush" in valid_key["msg"]
+    store[module.BOUND_DEVICES_KEY] = [
+        {"device_id": "dev-1", "push_token": "tok-1", "notify_enabled": True, "status": "active"}
+    ]
+    plugin._push = lambda title, text, extras=None: (False, "中转不可达")
+    failed = plugin.run(title="标题", text="正文")
+    assert failed["code"] != 0 and "中转不可达" in failed["msg"]
 
     plugin._enabled = False
-    disabled = plugin.run(apikey="test-key")
+    disabled = plugin.run()
     assert disabled["code"] != 0
 
 
@@ -167,63 +160,50 @@ def test_v2_layouts_stay_identical() -> None:
 
     package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))["MoviePilotAppPush"]
     versioned_package = json.loads((ROOT / "package.v2.json").read_text(encoding="utf-8"))["MoviePilotAppPush"]
-    assert package["version"] == versioned_package["version"] == "0.1.21"
+    assert package["version"] == versioned_package["version"] == "0.1.22"
     assert package["icon"] == versioned_package["icon"] == "MoviePilotAppPush.png"
 
 
 def test_run_records_last_result_and_page_shows_it() -> None:
     """run 记录最近一次测试结果，get_page 展示时间、目标与返回信息。"""
     module = _load_plugin()
-    plugin = _new_instance(
-        module,
-        {
-            "enabled": True,
-            "apikey": "test-key",
-            "token": "alias-device-1",
-            "appkey": "",
-            "mastersecret": "",
-        },
-    )
-    store = {}
-    plugin.save_data = lambda key, value, plugin_id=None: store.__setitem__(key, value)
-    plugin.get_data = lambda key=None, plugin_id=None: store.get(key)
+    plugin = _new_instance(module, {"enabled": True})
+    store = _stub_storage(plugin)
+    store[module.BOUND_DEVICES_KEY] = [
+        {"device_id": "dev-1", "push_token": "tok-1", "notify_enabled": True, "status": "active"}
+    ]
+    plugin._push = lambda title, text, extras=None: (False, "中转返回 502")
 
     empty_page = plugin.get_page()
     assert empty_page and empty_page[0]["component"] == "VAlert"
 
-    plugin.run(apikey="test-key")
+    plugin.run()
     saved = store.get("last_test_result")
-    assert saved and saved["code"] != 0 and "JPush" in saved["msg"]
-    assert "***" in saved["token"]
+    assert saved and saved["code"] != 0 and "502" in saved["msg"]
+    assert "已绑定设备" in saved["token"]
 
     page_text = json.dumps(plugin.get_page(), ensure_ascii=False)
     assert "最近一次测试结果" in page_text
-    assert "测试时间" in page_text and "JPush" in page_text
+    assert "测试时间" in page_text and "502" in page_text
 
 
 def test_dashboard_reports_stats_and_history() -> None:
     """仪表盘包含调用统计、连接状态与历史消息。"""
     module = _load_plugin()
-    plugin = _new_instance(
-        module,
-        {
-            "enabled": True,
-            "apikey": "test-key",
-            "token": "alias-device-1",
-            "appkey": "ak",
-            "mastersecret": "ms",
-        },
-    )
+    plugin = _new_instance(module, {"enabled": True})
     store = {}
     plugin.save_data = lambda key, value, plugin_id=None: store.__setitem__(key, value)
     plugin.get_data = lambda key=None, plugin_id=None: store.get(key)
+    store[module.BOUND_DEVICES_KEY] = [
+        {"device_id": "dev-1", "push_token": "tok-1", "notify_enabled": True, "status": "active"}
+    ]
 
     cols, attrs, elements = plugin.get_dashboard()
     assert cols["cols"] == 12 and attrs["refresh"]
     assert "暂无推送记录" in json.dumps(elements, ensure_ascii=False)
 
     plugin._push = lambda title, text, extras=None: (True, "推送成功，msg_id=m1")
-    plugin.run(apikey="test-key")
+    plugin.run()
     stats = store.get("push_stats")
     assert stats["push_total"] == 1 and stats["push_success"] == 1
     assert stats["test_calls"] == 1
@@ -296,14 +276,14 @@ def test_custom_test_content_and_onlyonce_trigger() -> None:
         module,
         {
             "enabled": True,
-            "apikey": "k",
-            "token": "t",
-            "appkey": "ak",
-            "mastersecret": "ms",
             "testtitle": "自定义标题",
             "testtext": "自定义内容",
         },
     )
+    store = _stub_storage(plugin)
+    store[module.BOUND_DEVICES_KEY] = [
+        {"device_id": "dev-1", "push_token": "tok-1", "notify_enabled": True, "status": "active"}
+    ]
     form, defaults = plugin.get_form()
     form_text = json.dumps(form, ensure_ascii=False)
     assert '"model": "testtitle"' in form_text
@@ -500,13 +480,13 @@ def test_huawei_channel_falls_back_to_jwt(monkeypatch) -> None:
     assert account["private_key"] not in message
 
 
-def test_huawei_missing_config_returns_readable_error() -> None:
-    """huawei 渠道未配置时返回可读错误，且 run 响应不含私钥。"""
+def test_not_ready_run_returns_readable_error_without_secrets() -> None:
+    """未绑定设备时返回可读错误，且响应里不出现服务账号私钥之类的内容。"""
     module = _load_plugin()
-    plugin = _new_instance(module, {"enabled": True, "apikey": "k", "channel": "huawei", "token": "TOKEN1"})
+    plugin = _new_instance(module, {"enabled": True})
     plugin._read_data = lambda key=None, plugin_id=None: None
-    result = plugin.run(apikey="k")
-    assert result["code"] != 0 and "华为" in result["msg"]
+    result = plugin.run()
+    assert result["code"] != 0 and "绑定设备" in result["msg"]
     assert "private_key" not in json.dumps(result, ensure_ascii=False)
 
 def test_form_only_keeps_test_fields() -> None:
@@ -517,9 +497,10 @@ def test_form_only_keeps_test_fields() -> None:
     components = form[0]["content"]
     models = [item.get("props", {}).get("model") for item in components]
 
-    for model in ("enabled", "apikey", "msgtypes", "testtitle", "testtext"):
+    for model in ("enabled", "msgtypes", "testtitle", "testtext"):
         assert model in models
     for model in (
+        "apikey",
         "channel",
         "token",
         "appkey",
@@ -531,9 +512,7 @@ def test_form_only_keeps_test_fields() -> None:
     ):
         assert model not in models
     assert not [item for item in components if item.get("component") == "VFileInput"]
-    assert defaults["channel"] == "gateway"
-    assert defaults["service_account_json"] == ""
-    assert "内置中转" in json.dumps(components, ensure_ascii=False)
+    assert "官方推送" in json.dumps(components, ensure_ascii=False)
 
 
 def test_huawei_error_codes_are_readable() -> None:
@@ -680,17 +659,11 @@ def test_extras_are_identical_on_jpush_and_huawei() -> None:
 def test_test_push_carries_detail_extras() -> None:
     """测试推送同样携带详情 extras。"""
     module = _load_plugin()
-    plugin = _new_instance(
-        module,
-        {
-            "enabled": True,
-            "apikey": "k",
-            "channel": "jpush",
-            "token": "t",
-            "appkey": "ak",
-            "mastersecret": "ms",
-        },
-    )
+    plugin = _new_instance(module, {"enabled": True})
+    store = _stub_storage(plugin)
+    store[module.BOUND_DEVICES_KEY] = [
+        {"device_id": "dev-1", "push_token": "tok-1", "notify_enabled": True, "status": "active"}
+    ]
     captured = {}
 
     def fake_push(title, text, extras=None):
@@ -698,7 +671,7 @@ def test_test_push_carries_detail_extras() -> None:
         return True, "ok"
 
     plugin._push = fake_push
-    plugin._execute_test("k", "自定义标题", "自定义内容")
+    plugin._execute_test("自定义标题", "自定义内容")
     assert captured["extras"]["page"] == "system-message"
     assert captured["extras"]["title"] == "自定义标题"
     assert captured["extras"]["text"] == "自定义内容"
@@ -719,21 +692,14 @@ def _flatten_page(node):
 def test_page_has_one_click_test_button_and_rate_rings() -> None:
     """详情页有一键测试按钮（调用固定 /run）与成功率/失败率环形仪表。"""
     module = _load_plugin()
-    plugin = _new_instance(
-        module,
-        {
-            "enabled": True,
-            "apikey": "k",
-            "channel": "jpush",
-            "token": "t",
-            "appkey": "ak",
-            "mastersecret": "ms",
-        },
-    )
+    plugin = _new_instance(module, {"enabled": True})
     store = {
         "push_stats": {"push_success": 3, "push_failure": 1},
         "push_history": [],
         "last_test_result": {},
+        module.BOUND_DEVICES_KEY: [
+            {"device_id": "dev-1", "push_token": "tok-1", "notify_enabled": True, "status": "active"}
+        ],
     }
     plugin._read_data = lambda key: store.get(key)
     nodes = list(_flatten_page(plugin.get_page()))
@@ -746,19 +712,19 @@ def test_page_has_one_click_test_button_and_rate_rings() -> None:
     click = buttons[0]["events"]["click"]
     assert click["api"] == "/plugin/MoviePilotAppPush/run"
     assert click["method"] == "GET"
-    assert click["params"]["apikey"] == "k"
+    assert "apikey" not in click["params"]
     assert "title" in click["params"] and "text" in click["params"]
 
 
 def test_page_test_button_hidden_when_not_ready() -> None:
-    """未配置 Push Key 时不展示测试按钮，而是给出提示。"""
+    """没有绑定设备（中转未就绪）时不展示测试按钮，而是给出提示。"""
     module = _load_plugin()
-    plugin = _new_instance(module, {"enabled": True, "channel": "jpush"})
+    plugin = _new_instance(module, {"enabled": True})
     store = {"push_stats": {}, "push_history": [], "last_test_result": {}}
     plugin._read_data = lambda key: store.get(key)
     nodes = list(_flatten_page(plugin.get_page()))
     assert not [n for n in nodes if n.get("component") == "VBtn" and n.get("events")]
-    assert any("请先在配置页保存" in json.dumps(n, ensure_ascii=False) for n in nodes)
+    assert any("绑定设备" in json.dumps(n, ensure_ascii=False) for n in nodes)
 
 
 def _stub_storage(plugin):

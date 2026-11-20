@@ -39,13 +39,15 @@ MoviePilot 宿主代码和测试为准；V2 兼容实现以 V2 宿主 SDK 与官
 
 - 推送 extras 字段固定为：`page`（固定 system-message）、`title`、`text`（≤300 字）、
   `msgtype`（NotificationType 名称）、`channel`、`source`、`userid`、`ts`（秒）；`type` 为
-  兼容旧版别名，值与 `msgtype` 一致。极光放 `notification.extras`（含各平台节点），
-  华为放 `payload.notification.clickAction.data`，两条渠道字段名与含义必须一致。
+  兼容旧版别名，值与 `msgtype` 一致。这些字段统一放在华为
+  `payload.notification.clickAction.data` 里——现在只有官方推送一条链路，不再有第二套载体。
+
 ## 固定契约（不可随意变更）
 
 - 插件 ID 固定为 `MoviePilotAppPush`，目录保持 `moviepilotapppush`，V2/V3 双布局。
-- 测试接口固定为 `GET /api/v1/plugin/MoviePilotAppPush/run`；参数 `apikey` 必填，`title`/`text`
-  可选；响应固定为 `{code, msg}`，成功时 `code` 为 0。
+- 测试接口固定为 `GET /api/v1/plugin/MoviePilotAppPush/run`；参数 `title`/`text`
+  可选（覆盖配置里的测试内容）；响应固定为 `{code, msg}`，成功时 `code` 为 0。
+  旧的 `apikey` 参数仍被接受但**不再校验**（接口本身要求登录态）。
 - 设备绑定接口固定为 `POST /device/bind`、`POST /device/unbind`、`POST /device/notify`、
   `GET /device/list`、`GET /device/remove?device_id=`，均声明 `auth: "bear"`，路径前缀
   `/api/v1/plugin/MoviePilotAppPush`；绑定用户身份取自宿主令牌，不读请求体里的用户字段。
@@ -53,8 +55,11 @@ MoviePilot 宿主代码和测试为准；V2 兼容实现以 V2 宿主 SDK 与官
   （device_id / push_token / name / user_id / user_name / notify_enabled / status 等）。
 - 配置字段固定为 `enabled`、`channel`、`apikey`、`token`、`appkey`、`mastersecret`、`appid`、
   `project_id`、`service_account_json`、`huawei_category`、`msgtypes`、`testtitle`、`testtext`、`onlyonce`。
-- 配置页只渲染测试项（`enabled`、`apikey`、`msgtypes`、`testtitle`、`testtext`）；渠道与凭据字段
-  保留在存储中以兼容旧配置，但不得再出现在表单里。推送统一走内置中转，**更新日志、README、设置页文案一律不得出现中转域名**。
+- 配置页只渲染四项：`enabled`、`msgtypes`、`testtitle`、`testtext`。Push Key 已移除（从未生效）；
+  渠道与凭据字段保留在存储中以兼容旧配置，但不得再出现在表单里。推送统一走内置中转，
+  **更新日志、README、设置页文案一律不得出现中转域名**。
+- 界面与历史消息里的渠道名统一写「官方推送」（`channel=huawei` 的历史记录写「华为」），
+  不得再出现「极光」字样——极光渠道早已移除，显示出来只会误导用户。
 - **`channel` 一律忽略**：`init_plugin` 里固定为 `gateway`，不得再按配置值分流到 jpush/huawei。
   历史直连代码可保留为死方法（测试直接调用），但主流程不得进入；否则老站点会继续拿本地
   服务账号直连华为，出现 `80200001` 认证错误。
